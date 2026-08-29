@@ -13,6 +13,6 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
-data/
+/data/
 htmlcov/
 .coverage
