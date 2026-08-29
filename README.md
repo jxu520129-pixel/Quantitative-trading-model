@@ -160,9 +160,82 @@ SMTP_PASSWORD=QQ 邮箱 SMTP 授权码（在邮箱设置里单独生成，不是
 EMAIL_TO=收件邮箱地址
 ```
 
+## 主升浪策略设计（事件驱动 × 宏观周期 × 产业链）
+
+> 本节是《主升浪策略-事件驱动周期分析技术方案》的核心浓缩（原方案文档已并入本节并删除），供快速了解策略定位、评分逻辑与演进路线。状态标记：✅ 已实现 / 🚧 部分实现（MVP）/ ⏳ 待做。
+
+### 核心思想与评分链（§1）
+
+策略不把「新闻」直接等价于「上涨」，而是把
+**事件 → 宏观环境 → 资产价格 → 产业链上下游 → 盈利预期 → 资金行为 → 股价周期阶段**
+串成一条可计算、可回测、可验证的因果链：
+
+```
+事件评分 → 环境评分 → 产业链传导评分 → 个股基本面/预期评分 → 股价周期评分 → 主升浪概率 → 选股排名
+```
+
+### 评分公式与选股门槛（§11）
+
+V1 评分公式（✅，`ashare_quant/main_rally.py` 的 `WEIGHTS`）：
+
+```
+主升浪评分 = 0.20×事件分 + 0.15×宏观分 + 0.20×产业链分 + 0.20×盈利分 + 0.25×技术分   （0–100）
+```
+
+选股门槛（§11.2，✅，报告中以绿/灰徽章标注）：事件分 ≥70、宏观环境分 ≥50、产业链分 ≥70、盈利预期分 ≥60、趋势分 ≥60。
+（技术方案原文为 10 因子加权，V1 先落地 5 因子，后续按 §6 因子库逐步扩展。）
+
+### 六阶段模型（§9）
+
+每只股票每日判定阶段：0 潜伏 / 1 启动 / 2 主升 / 3 加速 / 4 高潮 / 5 退潮。模型重点不是预测最高价，而是预测「未来 N 个交易日进入主升（阶段 2/3）的概率」——✅ 由 `ashare_quant/ml_model.py` 的 GBDT 模型输出（见 §10 模型 E）。
+
+### 20 类核心分析因素（§6）
+
+| 状态 | 因素 | 落地情况 |
+|---|---|---|
+| ✅ | F16 价格趋势（MA/MACD/RSI/ATR/突破/相对强度） | `strategies/factors.py` + `technical_score` |
+| 🚧 | F17 成交量与资金行为 | VWAP 偏离 / 量比 / 成交额 z（日线代理，分钟级待做） |
+| 🚧 | F01~F05 事件规模/深度/意外/级别/持续 | 关键词打分（`fundamental.py`），可选 LLM 结构化抽取 |
+| 🚧 | F06 宏观周期 / F07 利率 / F08 美元流动性 | `macro_regime_score`（GDP/M2/CPI 简版） |
+| 🚧 | F12 产业链上下游 / F13 中心性 | `industry_chain.py` 关键词图谱（有向图/GNN 待做） |
+| 🚧 | F14 盈利预期变化 | AkShare 财务摘要（营收/净利同比） |
+| ⏳ | F15 估值位置 / F18 市场宽度情绪 / F19 拥挤度 / F20 历史相似度 | 部分以评分近似，未独立建模 |
+
+### 事件关系（§7）与反向关系（§12）
+
+关系引擎至少覆盖 12 类（因果/上下游/替代/互补/竞争/成本传导/价格传导/政策传导/资本开支/库存周期/金融传导/替代路径）；反向关系模型区分「受益」与「受损」公司（投入/产出价格弹性、毛利率敏感度）。当前 MVP 用关键词图谱近似，正式有向图/GNN 待做。
+
+### 模型架构（§10）
+
+| 模型 | 任务 | 状态 |
+|---|---|---|
+| A 事件分类 | 抽取事件类型/方向/强度/持续 | 🚧 关键词兜底 + 可选 LLM 结构化抽取 |
+| B 事件相似度 | 相似事件 → 历史表现 | 🚧 `event_similarity.py`（TF-IDF） |
+| C 宏观状态 | Macro Regime 概率 | 🚧 规则打分，HMM 待做 |
+| D 产业链图 | 节点+边 → GNN | ⏳ |
+| E 收益预测 | P(未来20日进入主升) | ✅ `ml_model.py`（GBDT 基线） |
+
+### 事件研究（§13）与反事实（§18）
+
+事件日 T0 前后窗口（T-60 … T+120）回溯个股/行业收益、超额收益、回撤；反事实分析（Synthetic Control / DiD / Causal Forest）用于剥离市场本身上涨、估计事件真实增量贡献。🚧 已实现相似事件 5/10/20/60 日行业收益回溯。
+
+### 分阶段路线图（§21）与实现进度
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| Phase 1 MVP | 日线/宏观/事件库/因子/基础事件研究 | ✅ 已完成 |
+| Phase 2 产业链 | 有向图谱/GNN/公司上下游 | ⏳ 待做 |
+| Phase 3 历史模板 | 50 年全球事件库 → 相似事件 | 🚧 相似检索已做，50 年库待建 |
+| Phase 4 主升浪预测 | HMM/GNN/时序/因果 | 🚧 GBDT 基线已做，深度模型待做 |
+| Phase 5 实时系统 | 实时新闻/行情/盘中评分 | ⏳ 待做 |
+
+### 五层数据分离（§22）与免责声明（§23）
+
+事实层 / 市场层 / 关系层 / 推断层 / 验证层五层分离，避免把「分析结论」当「事实」训练。本系统为量化研究与模拟盘工具，**不构成任何投资建议**；实盘前须通过成本、滑点、停牌、涨跌停、流动性、幸存者偏差与严格样本外测试。
+
 ## 主升浪盘前扫描与富文本报告
 
-每日交易日 **09:25**（`scheduler.py` 的 `pre_market_scan`），系统按《主升浪策略-事件驱动周期分析技术方案.md》（§17.2 每日流程、§11.2 选股门槛、§20 输出样例）生成并推送盘前富文本报告。核心实现位于 `ashare_quant/main_rally.py`。
+每日交易日 **09:25**（`scheduler.py` 的 `pre_market_scan`），系统按上文「主升浪策略设计」（§17.2 每日流程、§11.2 选股门槛、§20 输出样例）生成并推送盘前富文本报告。核心实现位于 `ashare_quant/main_rally.py`。
 
 **报告内容（HTML 富文本邮件 + 纯文本兜底，企业微信发纯文本）**：
 
@@ -174,7 +247,7 @@ EMAIL_TO=收件邮箱地址
 6. **潜伏/启动阶段关注（趋势分 < 60，Top 10）**：事件与基本面达标但趋势尚未确认的标的，适合跟踪观察。
 7. **风险提示（命中负面事件，Top 10）**：行业命中减持/处罚/立案等负面事件（`causal_direction=负`）的候选，对应方案「退潮风险」提示。
 
-**评分口径**：`主升浪评分 = 0.20×事件分 + 0.15×宏观分 + 0.20×产业链分 + 0.20×盈利分 + 0.25×技术分`（`main_rally.py` 的 `WEIGHTS`，权重可按样本外回测调整）。主升概率为评分到 0–85% 的近似映射，标注「近似」，后续接入 §10 模型 E 后替换为模型输出。
+**评分口径**：`主升浪评分 = 0.20×事件分 + 0.15×宏观分 + 0.20×产业链分 + 0.20×盈利分 + 0.25×技术分`（`main_rally.py` 的 `WEIGHTS`，权重可按样本外回测调整）。主升概率优先由 §10 模型 E 的 GBDT 模型输出（标注「模型」），未训练或特征缺失时回退为评分近似映射（标注「近似」）。
 
 **推送通道**：与买点扫描共用 SMTP 邮件（HTML 富文本优先、纯文本兜底）和企业微信（纯文本），`.env` 配置方式见上节；未配置时仅写日志，不影响调度。
 
@@ -257,7 +330,35 @@ docker compose exec -T scheduler python -m ashare_quant.cli seed-demo
 docker compose exec -T scheduler python -m ashare_quant.cli paper-demo
 ```
 
-Docker 同时启动看板和调度器，共享一个 SQLite WAL 数据卷。镜像默认通过 DaoCloud 代理获取 Python Slim，并固定为 Docker Hub 官方清单摘要；其他网络环境可通过 `docker compose build --build-arg PYTHON_IMAGE=python:3.11-slim` 切回官方源。Linux 原生部署示例位于 `deploy/`：将项目放到 `/opt/ashare-quant`、创建 `quant` 用户和虚拟环境后，复制并启用两个 systemd unit。也可以使用 `deploy/crontab.example`，但不要同时运行 cron 和内置调度器。
+Docker 同时启动看板和调度器，共享一个 SQLite WAL 数据卷。镜像默认通过 DaoCloud 代理获取 Python Slim，并固定为 Docker Hub 官方清单摘要；其他网络环境可通过 `docker compose build --build-arg PYTHON_IMAGE=python:3.11-slim` 切回官方源，pip 依赖默认走清华镜像、可用 `--build-arg PIP_INDEX_URL=...` 覆盖。Linux 原生部署示例位于 `deploy/`：将项目放到 `/opt/ashare-quant`、创建 `quant` 用户和虚拟环境后，复制并启用两个 systemd unit。也可以使用 `deploy/crontab.example`，但不要同时运行 cron 和内置调度器。
+
+## 云服务器部署与更新
+
+云端采用「git 克隆 + Docker Compose」方式部署（生产运行于腾讯云轻量服务器 2核2G，后续可升级配置）。
+
+**首次部署**（详见 `deploy/cloud_setup.sh` 与 `部署更新指南.md`）：
+
+```bash
+# 服务器上：拉代码（私有仓库先 git config --global credential.helper store 存好凭据）
+git clone https://github.com/<账号>/<仓库>.git ashare-quant
+cd ashare-quant
+cp .env.example .env && vi .env          # 设置 DASHBOARD_PASSWORD
+bash deploy/cloud_setup.sh               # 自动：装 Docker + 2G swap + 调重训采样 + 构建启动
+```
+
+**日常更新**（改功能 → 上线）：
+
+```powershell
+# 本地（开 Clash 代理后）
+git add -A && git commit -m "改动说明" && git push
+```
+
+```bash
+# 云端
+cd ~/ashare-quant && git pull && sudo docker compose up -d --build
+```
+
+要点：数据（SQLite + 模型）存于 `quant-data` 数据卷，重建容器不丢数据（切勿 `docker compose down -v`）；`.env` 不进 git，云端本地保留；`config/default.yaml` 是版本化文件，云端若需覆盖参数用 `config/local.yaml` + `.env` 的 `QUANT_CONFIG` 指向，避免 `git pull` 冲突；看板端口 8501 需在云控制台防火墙放行。
 
 ## QMT、PTrade 与东方财富
 
