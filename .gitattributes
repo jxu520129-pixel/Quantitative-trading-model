@@ -1,0 +1,11 @@
+# 统一换行符：文本自动归一化，脚本/代码/配置强制 LF，避免 Windows 提交导致 Linux 端报错
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+*.service text eol=lf
+*.example text eol=lf

@@ -1,0 +1,8 @@
+1.启动 Docker Desktop
+2.打开PowerShell，输入：cd "C:\Users\Administrator\Desktop\Quantitative trading model"
+docker compose up -d
+3.验证：浏览器打开http://localhost:8501/，是否页面正常运行，
+查看容器是否正常，打开PowerShell，输入docker ps，会看见quantitativetradingmodel-dashboard-1   Up ...   0.0.0.0:8501->8501/tcp
+quantitativetradingmodel-scheduler-1   Up ... 
+docker ps 里确认 scheduler-1 是 Up 状态。
+

@@ -1,0 +1,17 @@
+[Unit]
+Description=A 股量化交易调度器
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ashare-quant
+EnvironmentFile=/opt/ashare-quant/.env
+ExecStart=/opt/ashare-quant/.venv/bin/python -m ashare_quant.cli scheduler
+Restart=on-failure
+RestartSec=10
+User=quant
+Group=quant
+
+[Install]
+WantedBy=multi-user.target

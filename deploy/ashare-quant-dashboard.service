@@ -1,0 +1,16 @@
+[Unit]
+Description=A 股量化交易 Streamlit 看板
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ashare-quant
+EnvironmentFile=/opt/ashare-quant/.env
+ExecStart=/opt/ashare-quant/.venv/bin/streamlit run dashboard.py --server.address=0.0.0.0 --server.port=8501
+Restart=on-failure
+RestartSec=10
+User=quant
+Group=quant
+
+[Install]
+WantedBy=multi-user.target

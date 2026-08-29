@@ -1,0 +1,94 @@
+storage:
+  sqlite_path: data/ashare_quant.db
+
+trading:
+  mode: PAPER
+  paper_initial_cash: 1000000
+  commission_rate: 0.00025
+  min_commission: 5
+  stamp_duty_rate: 0.001
+  slippage_rate: 0.0005
+  allow_stale_demo_prices: true
+
+risk:
+  max_single_position_weight: 0.20
+  daily_loss_stop: 0.03
+  max_positions: 5
+  max_daily_new_positions: 2
+  max_consecutive_failures: 3
+
+data:
+  primary: akshare
+  fallback: tushare
+  include_etf: true
+  stock_universe_index: "000300"
+  history_start: "2020-01-01"
+  max_update_symbols: 7000
+  strategy_scan_symbols: 2000
+  backtest_max_symbols: 7000
+
+strategy:
+  active: momentum_rotation
+
+strategies:
+  momentum_rotation:
+    lookback_days: 60
+    min_average_amount: 20000000
+  dual_moving_average:
+    fast_window: 10
+    slow_window: 30
+  simple_multifactor:
+    lookback_days: 20
+    momentum_window: 20
+    volatility_window: 20
+    liquidity_window: 20
+  reversal:
+    min_average_amount: 20000000
+  low_volatility:
+    min_average_amount: 20000000
+  trend:
+    min_average_amount: 20000000
+  liquidity:
+    min_average_amount: 0
+  rsi_mean_reversion:
+    min_average_amount: 20000000
+  enhanced_multifactor:
+    min_average_amount: 20000000
+
+backtest:
+  initial_cash: 1000000
+  start_date: "2020-01-01"
+  end_date: null
+  benchmark: "510300"
+
+model:
+  # 主升概率模型重训的采样标的数：内存紧张（如 2G 学生机/免费机）可调小到 100~150，
+  # 内存充足（4G+）保持 300 默认即可。仅影响训练样本量与重训耗时，不影响交易流程。
+  retrain_sample_symbols: 300
+
+scan:
+  max_price: 50                  # 价格上限（元）
+  min_price: 5                   # 价格下限（元）
+  min_average_amount: 100000000  # 近20日平均成交额下限（元）；全A股回测：1亿过滤小盘股→年化19.3%、回撤17.1%
+  min_average_volume: null       # 已停用：同上 近20日平均成交量下限（股）
+  # 财务/流动性指标过滤（0=不限制）
+  min_turnover: 0                # 最低换手率（%）
+  max_pe: 0                      # 最高动态市盈率（倍）
+  min_market_cap: 0              # 最低总市值（元）
+  max_per_strategy: 10
+  # 质量过滤（减少出手、提高胜率）
+  min_sector_change: 0.0        # 仅保留当日板块涨跌幅 >= 该值的候选（0=仅强势板块，null=关闭）
+  require_hot_stock: false      # true=仅保留东方财富人气榜前 hot_rank_limit 的候选
+  hot_rank_limit: 200
+  exclude_negative_notice: true # 排除有减持/处罚/立案/退市等负面公告的候选
+
+scheduler:
+  timezone: Asia/Shanghai
+  momentum_rebalance_weekday: 4
+  # 2026-07-06 起 A 股新增盘后固定价格交易时段（15:05–15:30），
+  # 盘后数据更新/信号生成须在 15:30 之后执行，才能拿到当日完整成交量。
+  morning_execution: "09:35"
+  signal_generation: "15:30"
+  end_of_day: "15:50"
+  # 收盘后主升概率模型重训（技术方案 §17.2「收盘后：重训/更新」）
+  retrain: "16:10"

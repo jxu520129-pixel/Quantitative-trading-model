@@ -1,0 +1,34 @@
+services:
+  dashboard:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8501:8501"
+    volumes:
+      - type: volume
+        source: quant-data
+        target: /app/data
+        volume:
+          nocopy: true
+      - ./config:/app/config:ro
+
+  scheduler:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    command: ["python", "-m", "ashare_quant.cli", "scheduler"]
+    volumes:
+      - type: volume
+        source: quant-data
+        target: /app/data
+        volume:
+          nocopy: true
+      - ./config:/app/config:ro
+
+volumes:
+  quant-data:
