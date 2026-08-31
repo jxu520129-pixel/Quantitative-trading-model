@@ -43,16 +43,32 @@ def load_hist_bars(db_path: str | Path, start: str | None = None, end: str | Non
             f"SELECT code,trade_date,open,high,low,close,amount FROM daily_bars WHERE {' AND '.join(clauses)}",
             con, params=params,
         )
+        delist_map = pd.read_sql_query(
+            "SELECT code, delist_date FROM stock_basic WHERE is_delisted=1 AND delist_date IS NOT NULL", con,
+        )
     finally:
         con.close()
     if frame.empty:
         raise RuntimeError("历史库没有可用的日线数据，请先执行 scripts/fetch_hist_data.py")
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
     frame = frame.sort_values("trade_date").drop_duplicates(["code", "trade_date"])
-    close = frame.pivot(index="trade_date", columns="code", values="close").ffill()
-    amount = frame.pivot(index="trade_date", columns="code", values="amount").ffill()
-    high = frame.pivot(index="trade_date", columns="code", values="high").ffill()
-    low = frame.pivot(index="trade_date", columns="code", values="low").ffill()
+    close = frame.pivot(index="trade_date", columns="code", values="close")
+    amount = frame.pivot(index="trade_date", columns="code", values="amount")
+    high = frame.pivot(index="trade_date", columns="code", values="high")
+    low = frame.pivot(index="trade_date", columns="code", values="low")
+
+    # 退市股在退市日之后置空，避免 ffill 把退市前价格延续到退市后（退市后不可交易）。
+    for _, row in delist_map.iterrows():
+        code, dl = row["code"], pd.to_datetime(row["delist_date"], format="%Y%m%d")
+        if code in close.columns:
+            close.loc[close.index > dl, code] = None
+            amount.loc[amount.index > dl, code] = None
+            high.loc[high.index > dl, code] = None
+            low.loc[low.index > dl, code] = None
+    close = close.ffill()
+    amount = amount.ffill()
+    high = high.ffill()
+    low = low.ffill()
 
     # 数据清洗：过滤复权因子跳变的股票。次新股（创业板/科创板）在前复权时
     # 可能因 adj_factor 缺失/跳变出现单日 ±30% 以上的假收益，污染动量等因子的回测。

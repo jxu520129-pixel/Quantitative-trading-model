@@ -94,18 +94,19 @@ def main() -> None:
     end_s = args.end.replace("-", "")
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
     conn = sqlite3.connect(db_path)
     conn.executescript(
         """
         PRAGMA journal_mode=WAL;
         PRAGMA synchronous=NORMAL;
+        DROP TABLE IF EXISTS stock_basic;
+        DROP TABLE IF EXISTS stock_industry;
+        DROP TABLE IF EXISTS daily_bars;
         CREATE TABLE stock_basic (
             code TEXT PRIMARY KEY, name TEXT NOT NULL, security_type TEXT NOT NULL,
             board TEXT NOT NULL DEFAULT 'MAIN', is_st INTEGER NOT NULL DEFAULT 0,
             is_delisted INTEGER NOT NULL DEFAULT 0, is_suspended INTEGER NOT NULL DEFAULT 0,
-            list_date TEXT, updated_at TEXT NOT NULL
+            list_date TEXT, delist_date TEXT, updated_at TEXT NOT NULL
         );
         CREATE TABLE stock_industry (
             code TEXT PRIMARY KEY, industry TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -121,30 +122,34 @@ def main() -> None:
     )
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 1) 股票列表
-    fields, items = _call("stock_basic", token, url, {"list_status": "L"},
-                          "ts_code,symbol,name,list_date,industry")
-    col = {f: i for i, f in enumerate(fields)}
+    # 1) 股票列表：拉取上市(L) + 退市(D)股，纳入历史退市股以修复幸存者偏差
     stock_rows, industry_rows = [], []
     seen = set()
-    for it in items:
-        code = it[col["ts_code"]].split(".")[0]
-        if code.startswith(_BJ_PREFIXES) or code in seen:
-            continue
-        seen.add(code)
-        name = it[col["name"]]
-        list_date = it[col["list_date"]]
-        industry = (it[col["industry"]] or "").strip()
-        stock_rows.append((code, name, "STOCK", _board_of(code), _is_st(name), 0, 0, list_date, now))
-        if industry:
-            industry_rows.append((code, industry, now))
+    for status in ("L", "D"):
+        fields, items = _call("stock_basic", token, url, {"list_status": status},
+                              "ts_code,symbol,name,list_date,delist_date,industry")
+        col = {f: i for i, f in enumerate(fields)}
+        for it in items:
+            code = it[col["ts_code"]].split(".")[0]
+            if code.startswith(_BJ_PREFIXES) or code in seen:
+                continue
+            seen.add(code)
+            name = it[col["name"]]
+            list_date = it[col["list_date"]]
+            delist_date = it[col["delist_date"]] if "delist_date" in col else None
+            industry = (it[col["industry"]] or "").strip()
+            is_delisted = 1 if delist_date else 0
+            stock_rows.append((code, name, "STOCK", _board_of(code), _is_st(name), is_delisted, 0, list_date, delist_date, now))
+            if industry:
+                industry_rows.append((code, industry, now))
     conn.executemany(
-        "INSERT INTO stock_basic(code,name,security_type,board,is_st,is_delisted,is_suspended,list_date,updated_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?)", stock_rows)
+        "INSERT INTO stock_basic(code,name,security_type,board,is_st,is_delisted,is_suspended,list_date,delist_date,updated_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)", stock_rows)
     conn.executemany(
         "INSERT INTO stock_industry(code,industry,updated_at) VALUES(?,?,?)", industry_rows)
     conn.commit()
-    print(f"证券池：{len(stock_rows)} 只（含行业映射 {len(industry_rows)} 只）", flush=True)
+    n_delisted = sum(1 for r in stock_rows if r[5])
+    print(f"证券池：{len(stock_rows)} 只（含退市 {n_delisted} 只，行业映射 {len(industry_rows)} 只）", flush=True)
 
     # 2) 交易日历
     _, cal_items = _call("trade_cal", token, url,
@@ -161,8 +166,32 @@ def main() -> None:
             code = it[0].split(".")[0]
             if code not in latest_adj:
                 latest_adj[code] = float(it[1])
-        if len(latest_adj) >= len(stock_rows) * 0.99:
-            break
+    # 退市股在最后 3 个交易日已无 adj_factor，这里按「退市日前最后一个交易日」补拉其复权基准
+    delisted = [(r[0], r[8]) for r in stock_rows if r[5]]
+    if delisted:
+        code_delist = {c: dl for c, dl in delisted}
+        last_day: dict[str, str] = {}
+        for code, dl in delisted:
+            prev = None
+            for d in trade_days:
+                if d <= dl:
+                    prev = d
+                else:
+                    break
+            if prev:
+                last_day[code] = prev
+        by_day: dict[str, list[str]] = {}
+        for code, day in last_day.items():
+            by_day.setdefault(day, []).append(code)
+        for day, codes in by_day.items():
+            try:
+                _, adj_items = _call("adj_factor", token, url, {"trade_date": day}, "ts_code,adj_factor")
+                for it in adj_items:
+                    c = it[0].split(".")[0]
+                    if c in codes and c not in latest_adj:
+                        latest_adj[c] = float(it[1])
+            except Exception:
+                pass  # 退市日无 adj_factor 数据，该退市股退化为不复权
     print(f"前复权基准：{len(latest_adj)} 只", flush=True)
 
     # 4) 逐日拉 daily + adj_factor，当场前复权并流式写库（并发预取，按日期顺序消费）
