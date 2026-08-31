@@ -280,6 +280,31 @@ def summary(returns: pd.Series) -> dict[str, float]:
     }
 
 
+def market_benchmark(close: pd.DataFrame) -> pd.Series:
+    """全市场等权日收益，作为市场牛熊的代理基准（无需外部指数数据，离线可用）。"""
+    return close.pct_change().mean(axis=1)
+
+
+def apply_market_timing(
+    returns: pd.Series,
+    benchmark: pd.Series,
+    ma_window: int = 60,
+    bear_exposure: float = 0.3,
+) -> pd.Series:
+    """对收益序列应用大盘择时：基准净值跌破 N 日均线时降仓到 ``bear_exposure``。
+
+    用 T-1 日及以前的信息决定 T 日仓位（``shift(1)``），严格无未来函数。
+    ``returns`` 与 ``benchmark`` 需对齐到同一交易日索引。
+    """
+    equity = (1.0 + benchmark.fillna(0.0)).cumprod()
+    ma = equity.rolling(ma_window).mean()
+    exposure = pd.Series(1.0, index=benchmark.index)
+    exposure[equity < ma] = bear_exposure
+    exposure = exposure.shift(1).fillna(1.0)  # 用前一日信号，避免未来函数
+    aligned = returns.reindex(exposure.index).fillna(0.0)
+    return aligned * exposure
+
+
 def combine_returns(returns: dict[str, pd.Series], method: str = "inverse_vol") -> pd.Series:
     """合并多个策略的日度收益序列。
 

@@ -29,9 +29,11 @@ import pandas as pd  # noqa: E402
 from ashare_quant.database import Database  # noqa: E402
 from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest  # noqa: E402
 from ashare_quant.portfolio import (  # noqa: E402
+    apply_market_timing,
     combine_returns,
     cross_sectional_returns,
     load_hist_bars,
+    market_benchmark,
     summary,
 )
 
@@ -80,8 +82,15 @@ def main() -> None:
     returns["组合·全部逆波动率"] = combine_returns(singles, "inverse_vol")
     # 优选：仅纳入回测期内年化 > 0 的策略，避免负收益的追涨因子拖累组合
     positive = {k: v for k, v in singles.items() if summary(v)["annual_return"] > 0}
-    returns["组合·优选逆波动率"] = combine_returns(positive, "inverse_vol")
+    best_port = combine_returns(positive, "inverse_vol")
+    returns["组合·优选逆波动率"] = best_port
     returns["组合·优选低回撤加权"] = combine_returns(positive, "min_drawdown")
+
+    # 大盘择时：对优选组合应用全市场等权基准的均线择时（熊市降仓）
+    bench = market_benchmark(close)
+    for window, bear in [(60, 0.3), (60, 0.0), (200, 0.3)]:
+        label = f"组合·优选·择时MA{window}仓位{bear:.0%}"
+        returns[label] = apply_market_timing(best_port, bench, ma_window=window, bear_exposure=bear)
 
     # 输出对比表
     print(f"{'策略':<12} {'年化':>9} {'最大回撤':>9} {'夏普':>7}")
