@@ -6,6 +6,8 @@ from .base import Broker
 
 
 class EasyTraderBroker(Broker):
+    """东方财富/easytrader 接入边界（V1 明确禁用，初始化即抛错，防止误自动化真实 GUI）。"""
+
     def __init__(self, client_name: str = "eastmoney"):
         self.client_name = client_name
         raise RuntimeError(

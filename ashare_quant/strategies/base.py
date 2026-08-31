@@ -12,6 +12,8 @@ from ..models import Signal, SignalAction
 
 @dataclass(frozen=True)
 class StrategyContext:
+    """策略生成信号所需的上下文：交易日、候选池、各标的日线、当前持仓与持仓上限。"""
+
     as_of_date: str
     universe: pd.DataFrame
     bars_by_code: dict[str, pd.DataFrame]
@@ -20,6 +22,8 @@ class StrategyContext:
 
 
 class BaseStrategy(ABC):
+    """策略基类：约定 ``generate`` 接口，并提供标准的调仓信号构造逻辑。"""
+
     name: str
 
     def __init__(self, parameters: dict[str, object]):
@@ -30,6 +34,11 @@ class BaseStrategy(ABC):
         """Return actionable standardized signals for the next trading session."""
 
     def rebalance_signals(self, context: StrategyContext, ranked: list[tuple[str, float, str]]) -> list[Signal]:
+        """把按评分降序的 ``(code, score, reason)`` 列表转换为调仓信号。
+
+        不在目标组合内的持仓生成卖出信号，不在持仓中的选中标的生成买入信号，
+        目标权重按持仓上限等分。
+        """
         selected = ranked[: context.max_positions]
         selected_codes = {code for code, _score, _reason in selected}
         names = dict(zip(context.universe["code"], context.universe["name"], strict=False))
@@ -50,6 +59,7 @@ class BaseStrategy(ABC):
 
 
 def usable_bars(frame: pd.DataFrame, as_of_date: str, minimum: int) -> pd.DataFrame | None:
+    """截取截至 ``as_of_date`` 的日线并校验最少样本数，不足则返回 None（该标的不可用）。"""
     if frame.empty:
         return None
     data = frame[frame["trade_date"].astype(str).str[:10] <= as_of_date].copy()

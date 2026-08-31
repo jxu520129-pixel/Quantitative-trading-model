@@ -28,6 +28,7 @@ def _skip_if_holiday(runtime: Runtime, label: str) -> bool:
 
 
 def after_close(runtime: Runtime) -> None:
+    """盘后流程（signal_generation 时点）：更新日线 → 买点扫描 → 生成并排队次日信号。"""
     if _skip_if_holiday(runtime, "盘后流程"):
         return
     if not runtime.control.get_bool("strategy_enabled", True):
@@ -50,6 +51,7 @@ def after_close(runtime: Runtime) -> None:
 
 
 def morning_execution(runtime: Runtime) -> None:
+    """晨间成交（morning_execution 时点）：执行模拟盘当日待成交委托。"""
     if _skip_if_holiday(runtime, "晨间成交"):
         return
     if not runtime.control.get_bool("paper_execution_enabled", True):
@@ -59,6 +61,7 @@ def morning_execution(runtime: Runtime) -> None:
 
 
 def end_of_day(runtime: Runtime) -> None:
+    """收盘估值（end_of_day 时点）：按收盘价更新账户净值并检查日亏损限制。"""
     if _skip_if_holiday(runtime, "收盘估值"):
         return
     account = runtime.broker.mark_to_market(today_text())
@@ -107,11 +110,13 @@ def pre_market_scan(runtime: Runtime) -> None:
 
 
 def _parse_hhmm(value: str) -> tuple[int, int]:
+    """把 ``HH:MM`` 字符串解析为 ``(时, 分)`` 整数元组。"""
     hour_text, minute_text = value.split(":", 1)
     return int(hour_text), int(minute_text)
 
 
 def run_scheduler(config_path: str | None = None) -> None:
+    """启动长期运行的阻塞式调度器：按配置注册盘前/盘中/盘后/重训等定时任务。"""
     runtime = build_runtime(config_path)
     sched_cfg = runtime.settings.raw["scheduler"]
     timezone = str(sched_cfg["timezone"])

@@ -8,9 +8,12 @@ from .base import BaseStrategy, StrategyContext, usable_bars
 
 
 class DualMovingAverageStrategy(BaseStrategy):
+    """双均线趋势：快线上穿慢线（多头排列）时买入，按快慢线乖离率排序。"""
+
     name = "dual_moving_average"
 
     def generate(self, context: StrategyContext):
+        """筛选快均线高于慢均线的标的，按乖离率（快/慢 − 1）降序调仓。"""
         fast = int(self.parameters.get("fast_window", 10))
         slow = int(self.parameters.get("slow_window", 30))
         minimum = max(fast, slow)

@@ -10,17 +10,23 @@ from uuid import uuid4
 
 
 class SignalAction(str, Enum):
+    """策略信号的交易动作：买入 / 卖出 / 持有（仅记录）。"""
+
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
 
 
 class OrderSide(str, Enum):
+    """委托方向：买入 / 卖出。"""
+
     BUY = "BUY"
     SELL = "SELL"
 
 
 class OrderStatus(str, Enum):
+    """委托生命周期状态：待成交 / 已成交 / 已拒绝 / 已撤销 / 失败。"""
+
     PENDING = "PENDING"
     FILLED = "FILLED"
     REJECTED = "REJECTED"
@@ -29,12 +35,16 @@ class OrderStatus(str, Enum):
 
 
 class TradeMode(str, Enum):
+    """交易模式：PAPER 模拟盘 / LIVE 实盘。V1 默认且仅落地 PAPER。"""
+
     PAPER = "PAPER"
     LIVE = "LIVE"
 
 
 @dataclass(frozen=True)
 class Signal:
+    """策略生成的一条标准化调仓信号（不可变）。"""
+
     code: str
     action: SignalAction
     as_of_date: str
@@ -48,6 +58,8 @@ class Signal:
 
 @dataclass(frozen=True)
 class OrderRequest:
+    """由信号转换而来、交给券商执行的一笔委托请求（不可变）。"""
+
     code: str
     side: OrderSide
     quantity: int
@@ -61,6 +73,8 @@ class OrderRequest:
 
 @dataclass
 class Position:
+    """单只证券的持仓快照（可变，随成交与估值更新）。"""
+
     code: str
     name: str
     quantity: int
@@ -71,15 +85,19 @@ class Position:
 
     @property
     def market_value(self) -> float:
+        """持仓市值 = 数量 × 最新价。"""
         return self.quantity * self.latest_price
 
     @property
     def unrealized_pnl(self) -> float:
+        """浮动盈亏 =（最新价 − 成本价）× 数量。"""
         return (self.latest_price - self.avg_cost) * self.quantity
 
 
 @dataclass
 class Account:
+    """账户资金快照。"""
+
     account_id: str
     cash: float
     market_value: float
@@ -88,4 +106,5 @@ class Account:
 
 
 def utc_now_text() -> str:
+    """返回去时区、去微秒的 UTC 时间字符串（格式 ``YYYY-MM-DD HH:MM:SS``），用于落库统一时间戳。"""
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat(sep=" ")

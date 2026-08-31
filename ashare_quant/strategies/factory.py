@@ -16,6 +16,7 @@ STRATEGIES: dict[str, type[BaseStrategy]] = {
 
 
 def build_strategy(name: str, parameters: dict[str, object]) -> BaseStrategy:
+    """按策略名从注册表实例化策略，未知名称抛出含可用选项的 ValueError。"""
     try:
         return STRATEGIES[name](parameters)
     except KeyError as error:

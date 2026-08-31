@@ -13,6 +13,8 @@ from ..strategies.base import StrategyContext
 
 
 class SignalService:
+    """加载缓存行情、运行策略、持久化标准化信号，并在有新信号时推送通知。"""
+
     def __init__(self, database: Database, data: DataService, settings: Settings, notifications: NotificationHub):
         self.database = database
         self.data = data
@@ -20,6 +22,7 @@ class SignalService:
         self.notifications = notifications
 
     def generate(self, as_of_date: str | None = None, strategy_name: str | None = None) -> list[Signal]:
+        """对当前候选池运行策略，生成并落库调仓信号；有新信号时推送「策略交易信号」通知。"""
         strategy_name = strategy_name or self.settings.active_strategy
         universe = self.data.eligible_universe(limit=int(self.settings.data["strategy_scan_symbols"]))
         if universe.empty:

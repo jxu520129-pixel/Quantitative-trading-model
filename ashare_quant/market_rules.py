@@ -10,15 +10,19 @@ LOT_SIZE = 100
 
 @dataclass(frozen=True)
 class TradingCosts:
+    """A 股交易费用参数（佣金、印花税、滑点），回测与模拟盘共用。"""
+
     commission_rate: float = 0.00025
     min_commission: float = 5.0
     stamp_duty_rate: float = 0.001
     slippage_rate: float = 0.0005
 
     def commission(self, amount: float) -> float:
+        """按成交额计算佣金，含 5 元最低佣金下限。"""
         return max(abs(amount) * self.commission_rate, self.min_commission)
 
     def stamp_duty(self, amount: float, is_sell: bool) -> float:
+        """计算印花税：仅卖出收取（A 股单边征收）。"""
         return abs(amount) * self.stamp_duty_rate if is_sell else 0.0
 
     def slipped_price(self, price: float, is_buy: bool) -> float:
@@ -27,6 +31,7 @@ class TradingCosts:
 
 
 def round_to_lot(quantity: float) -> int:
+    """把股数向下取整到 100 股整数倍（A 股最小交易单位）。"""
     return max(0, int(quantity // LOT_SIZE) * LOT_SIZE)
 
 

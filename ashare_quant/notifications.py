@@ -17,6 +17,8 @@ LOG = logging.getLogger(__name__)
 
 
 class NotificationHub:
+    """通知中心：企业微信机器人 + SMTP 邮件两个可选通道，尽力投递、失败不阻断交易。"""
+
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -33,6 +35,7 @@ class NotificationHub:
         ).start()
 
     def _deliver(self, title: str, message: str, level: str, html: str | None) -> None:
+        """实际投递：先发企业微信（纯文本），再发 SMTP 邮件（可选 HTML 富文本）。"""
         text = f"[{label_value(level)}] {title}\n{message}"
         if self.settings.wecom_webhook:
             try:

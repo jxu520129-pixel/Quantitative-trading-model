@@ -55,6 +55,8 @@ def configure_console_encoding() -> None:
 
 
 def print_json(value: Any) -> None:
+    """把结果序列化为中文 JSON 打印到控制台（dataclass 自动转 dict）。"""
+
     def encode(item: Any) -> Any:
         return dataclasses.asdict(item) if dataclasses.is_dataclass(item) else str(item)
 
@@ -62,6 +64,7 @@ def print_json(value: Any) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构建命令行解析器，注册 init-db/seed-demo/backtest 等全部子命令。"""
     parser = ChineseArgumentParser(add_help=False, description="模拟盘优先的 A 股量化交易系统")
     parser._positionals.title = "位置参数"
     parser._optionals.title = "选项"
@@ -117,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """命令行入口：解析子命令并分发到对应处理逻辑（初始化/数据/回测/信号/调度等）。"""
     configure_console_encoding()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
     args = build_parser().parse_args()

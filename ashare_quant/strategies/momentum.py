@@ -8,9 +8,12 @@ from .base import BaseStrategy, StrategyContext, usable_bars
 
 
 class MomentumRotationStrategy(BaseStrategy):
+    """周度动量轮动：按 lookback 日涨幅排序，选出成交额达标的强势股。"""
+
     name = "momentum_rotation"
 
     def generate(self, context: StrategyContext):
+        """计算候选池各标的的 lookback 日动量，过滤低成交额后按动量降序调仓。"""
         lookback = int(self.parameters.get("lookback_days", 60))
         min_amount = float(self.parameters.get("min_average_amount", 20_000_000))
         ranked: list[tuple[str, float, str]] = []

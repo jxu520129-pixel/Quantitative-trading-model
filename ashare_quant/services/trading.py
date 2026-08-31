@@ -17,6 +17,7 @@ from ..utils import normalize_date, today_text
 
 
 def next_weekday(value: str) -> str:
+    """返回给定日期的下一交易日（跳过周六周日，不含节假日判断）。"""
     day = pd.Timestamp(normalize_date(value)) + timedelta(days=1)
     while day.weekday() >= 5:
         day += timedelta(days=1)
@@ -24,6 +25,8 @@ def next_weekday(value: str) -> str:
 
 
 class TradingService:
+    """把策略信号转换为整手委托，并执行晨间模拟成交流程。"""
+
     def __init__(
         self, database: Database, data: DataService, broker: PaperBroker,
         settings: Settings, notifications: NotificationHub,
@@ -35,6 +38,7 @@ class TradingService:
         self.notifications = notifications
 
     def queue_new_signals(self, as_of_date: str | None = None) -> dict[str, int]:
+        """把状态为 NEW 的信号转换为委托排队（卖出优先、按评分降序），返回排队/跳过计数。"""
         clauses = ["status='NEW'"]
         params: list[str] = []
         if as_of_date:
@@ -87,6 +91,7 @@ class TradingService:
         return outcome
 
     def execute_morning(self, trade_date: str | None = None, refresh_quotes: bool = True) -> dict[str, int]:
+        """执行晨间成交流程：刷新待执行标的最新价 → 滚动交易日 → 撮合委托，返回成交统计。"""
         trade_date = normalize_date(trade_date or today_text())
         pending = self.database.query_all("SELECT DISTINCT code FROM orders WHERE status='PENDING' AND trade_date<=?", (trade_date,))
         if refresh_quotes and pending:
@@ -102,6 +107,7 @@ class TradingService:
         return outcome
 
     def queue_manual_close(self, code: str, as_of_date: str | None = None) -> str:
+        """看板手动全量平仓：对指定持仓提交一笔卖出委托，返回委托 id。"""
         position = next((item for item in self.broker.get_positions() if item.code == code), None)
         if not position:
             raise ValueError(f"未找到证券 {code} 的持仓")
@@ -115,4 +121,5 @@ class TradingService:
         return self.broker.submit_order(request)
 
     def _set_signal_status(self, signal_id: str, status: str) -> None:
+        """更新信号状态（NEW → QUEUED / SKIPPED / DEFERRED 等）。"""
         self.database.execute("UPDATE signals SET status=? WHERE id=?", (status, signal_id))

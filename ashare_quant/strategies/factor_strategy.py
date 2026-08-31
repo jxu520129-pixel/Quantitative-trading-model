@@ -13,36 +13,49 @@ class FactorStrategy(BaseStrategy):
     factors: tuple[tuple[str, float], ...] = ()
 
     def generate(self, context):
+        """对候选池按 ``self.factors`` 做带符号加权横截面打分，再转换为调仓信号。"""
         ranked = cross_sectional_rank_score(context.bars_by_code, self.factors, self.parameters)
         return self.rebalance_signals(context, ranked)
 
 
 class ReversalStrategy(FactorStrategy):
+    """短期反转：买入近期超跌标的（reversal 正向权重）。"""
+
     name = "reversal"
     factors = (("reversal", 1.0),)
 
 
 class LowVolatilityStrategy(FactorStrategy):
+    """低波动：偏好低波动、低真实波幅的标的（波动率/ATR 负向权重）。"""
+
     name = "low_volatility"
     factors = (("volatility", -1.0), ("atr", -0.5))
 
 
 class TrendStrategy(FactorStrategy):
+    """趋势跟踪：偏好接近 52 周新高、均线多头、MACD 走强的标的。"""
+
     name = "trend"
     factors = (("high_52w", 1.0), ("ma_trend", 0.6), ("macd", 0.4))
 
 
 class LiquidityStrategy(FactorStrategy):
+    """流动性：偏好高成交额、低非流动性的标的。"""
+
     name = "liquidity"
     factors = (("liquidity", 1.0), ("amihud", -0.5))
 
 
 class RsiMeanReversionStrategy(FactorStrategy):
+    """RSI 超卖反转：买入 RSI 偏低（超卖）的标的。"""
+
     name = "rsi_mean_reversion"
     factors = (("rsi", -1.0),)
 
 
 class EnhancedMultiFactorStrategy(FactorStrategy):
+    """增强多因子：动量 + 反转 + 低波动 + 流动性 + 52 周新高 的组合打分。"""
+
     name = "enhanced_multifactor"
     factors = (
         ("momentum", 0.5), ("reversal", 0.2), ("volatility", -0.4),

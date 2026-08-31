@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并两配置字典：override 的叶子值覆盖 base，嵌套字典逐层合并。"""
     merged = base.copy()
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -26,6 +27,8 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 @dataclass(frozen=True)
 class Settings:
+    """运行期配置快照（不可变）：YAML 原始字典 + 从环境变量单独读取的敏感项。"""
+
     root: Path
     raw: dict[str, Any]
     db_path: Path
@@ -42,31 +45,37 @@ class Settings:
 
     @property
     def trading(self) -> dict[str, Any]:
+        """交易相关配置（模式、资金、费率、滑点）。"""
         return self.raw["trading"]
 
     @property
     def risk(self) -> dict[str, Any]:
+        """风控相关配置（仓位上限、日亏损、失败熔断）。"""
         return self.raw["risk"]
 
     @property
     def strategies(self) -> dict[str, Any]:
+        """各策略参数配置。"""
         return self.raw["strategies"]
 
     @property
     def active_strategy(self) -> str:
+        """当前启用的策略标识。"""
         return str(self.raw["strategy"]["active"])
 
     @property
     def data(self) -> dict[str, Any]:
+        """数据源与候选池相关配置。"""
         return self.raw["data"]
 
     @property
     def paper_initial_cash(self) -> float:
+        """模拟盘初始资金。"""
         return float(self.trading["paper_initial_cash"])
 
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
-    """Load checked-in defaults, then optional local config and environment secrets."""
+    """加载配置：默认 YAML → 可选本地配置（QUANT_CONFIG）→ 环境变量敏感项，返回 Settings。"""
     load_dotenv(ROOT / ".env", override=False)
     default_path = ROOT / "config" / "default.yaml"
     with default_path.open("r", encoding="utf-8") as handle:

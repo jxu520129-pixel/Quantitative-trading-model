@@ -32,6 +32,7 @@ class TradingCalendar:
         return days
 
     def is_trading_day(self, value: str | object) -> bool:
+        """判断给定日期是否为交易日（惰性加载并缓存日历，接口失败退回工作日判断）。"""
         if self._days is None:
             with self._lock:
                 if self._days is None:

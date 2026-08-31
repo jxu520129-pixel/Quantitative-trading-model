@@ -19,6 +19,8 @@ from .trading import TradingService
 
 @dataclass(frozen=True)
 class Runtime:
+    """一次运行所需的全部依赖集合（依赖注入容器），由 ``build_runtime`` 统一装配。"""
+
     settings: Settings
     database: Database
     data: DataService
@@ -33,6 +35,7 @@ class Runtime:
 
 
 def build_runtime(config_path: str | None = None) -> Runtime:
+    """加载配置并装配全部服务依赖，返回可用的 Runtime（CLI/调度器/看板/测试共用）。"""
     settings = load_settings(config_path)
     database = Database(settings.db_path)
     database.initialize(settings.paper_initial_cash)

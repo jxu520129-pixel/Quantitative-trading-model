@@ -135,13 +135,14 @@ CREATE TABLE IF NOT EXISTS model_runs (
 
 
 class Database:
-    """A small thread-safe wrapper around a single SQLite database file."""
+    """围绕单个 SQLite 数据库文件的线程安全访问层（RLock 串行化写 + WAL）。"""
 
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.RLock()
 
     def connect(self) -> sqlite3.Connection:
+        """新建一个启用 WAL、外键与忙等待的连接（每次操作独立连接）。"""
         connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
@@ -150,6 +151,7 @@ class Database:
         return connection
 
     def initialize(self, initial_cash: float) -> None:
+        """建库建表、执行旧库列迁移并写入模拟账户/风控/开关初始状态（幂等）。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self.connect() as conn:
             conn.executescript(SCHEMA)
@@ -179,19 +181,23 @@ class Database:
             )
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
+        """执行单条写语句（自动提交）。"""
         with self._lock, self.connect() as conn:
             conn.execute(sql, params)
 
     def executemany(self, sql: str, params: Iterable[Sequence[Any]]) -> None:
+        """批量执行写语句（自动提交）。"""
         with self._lock, self.connect() as conn:
             conn.executemany(sql, params)
 
     def query_one(self, sql: str, params: Sequence[Any] = ()) -> dict[str, Any] | None:
+        """查询单行，返回字典（无结果返回 None）。"""
         with self._lock, self.connect() as conn:
             row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
     def query_all(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+        """查询多行，返回字典列表。"""
         with self._lock, self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
@@ -201,6 +207,8 @@ class Database:
 
 
 class _Transaction:
+    """多步原子事务上下文：进入时加锁并 BEGIN IMMEDIATE，退出时提交/回滚。"""
+
     def __init__(self, database: Database):
         self.database = database
         self.connection: sqlite3.Connection | None = None

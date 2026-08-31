@@ -21,23 +21,30 @@ from .strategies.factors import cross_sectional_rank_score
 
 
 class ASharePandasData(bt.feeds.PandasData):
+    """扩展 Backtrader 数据源，额外注入 ``amount``（成交额）与 ``pre_close``（昨收）两条线。"""
+
     lines = ("amount", "pre_close")
     params = (("amount", "amount"), ("pre_close", "pre_close"))
 
 
 class AShareCommissionInfo(bt.CommInfoBase):
+    """A 股佣金模型：佣金（含 5 元最低）+ 卖出印花税。"""
+
     params = (
         ("commission_rate", 0.00025), ("min_commission", 5.0),
         ("stamp_duty_rate", 0.001), ("stocklike", True), ("commtype", bt.CommInfoBase.COMM_FIXED),
     )
 
     def _getcommission(self, size, price, pseudoexec):
+        """按成交额计算单边费用；卖出（size<0）额外计印花税。"""
         amount = abs(size * price)
         commission = max(amount * self.p.commission_rate, self.p.min_commission) if size else 0.0
         return commission + (amount * self.p.stamp_duty_rate if size < 0 else 0.0)
 
 
 class EquityCurveAnalyzer(bt.Analyzer):
+    """逐日记录账户权益，用于生成资金曲线。"""
+
     def start(self):
         self.values = []
 
@@ -62,6 +69,7 @@ class RankingBacktraderStrategy(bt.Strategy):
         self.last_buy_date: dict[str, object] = {}
 
     def next_open(self):
+        """每周首个交易日的开盘调仓：先卖出落选持仓，再按目标权重买入选中标的。"""
         current_date = self.datetime.date(0)
         week = current_date.isocalendar()[:2]
         if week == self.last_rebalance_week:
@@ -98,6 +106,7 @@ class RankingBacktraderStrategy(bt.Strategy):
             self._order_target_lot(data, target_weight)
 
     def notify_order(self, order):
+        """记录当日已买入的标的，避免同一交易日重复开仓。"""
         if order.status == order.Completed and order.isbuy():
             self.last_buy_date[order.data._name] = self.datetime.date(0)
 
@@ -118,6 +127,7 @@ class RankingBacktraderStrategy(bt.Strategy):
             self.sell(data=data, size=min(position.size, shares))
 
     def _score(self, data) -> float | None:
+        """对单只标的计算回测评分（内联实现动量轮动与双均线两种策略）。"""
         name = self.p.strategy_name
         if name == "momentum_rotation":
             lookback = int(self.parameters.get("lookback_days", 60))
@@ -138,6 +148,7 @@ class RankingBacktraderStrategy(bt.Strategy):
         raise ValueError(f"不支持的回测策略：{name}")
 
     def _score_universe(self) -> list[tuple[str, float]]:
+        """对全部标的打分：因子策略走共享的横截面打分，其余走内联实现，返回按分排序的列表。"""
         specs = FACTOR_STRATEGY_SPECS.get(self.p.strategy_name)
         if specs is not None:
             frames = {data._name: self._frame(data) for data in self.datas}
@@ -151,6 +162,7 @@ class RankingBacktraderStrategy(bt.Strategy):
         return ranked
 
     def _frame(self, data, lookback: int = 400) -> pd.DataFrame:
+        """把 Backtrader 数据线转成日线 DataFrame（只取已收盘 bar，与实盘口径一致）。"""
         # 只取已收盘的 bar（ago=1 起），与实盘信号生成使用完整交易日口径一致，避免把当日
         # cheat_on_open 尚未定型的 close 当作已收盘价。
         n = min(len(data) - 1, lookback)
@@ -168,12 +180,15 @@ class RankingBacktraderStrategy(bt.Strategy):
 
 
 class BacktestEngine:
+    """Backtrader 回测引擎：加载日线、运行策略、计算指标并落库供看板展示。"""
+
     def __init__(self, database: Database, data_service: DataService, settings: Settings):
         self.database = database
         self.data_service = data_service
         self.settings = settings
 
     def run(self, strategy_name: str, start_date: str, end_date: str, initial_cash: float | None = None) -> dict[str, object]:
+        """运行一次回测，返回含年化、回撤、夏普、胜率、资金曲线等指标的字典。"""
         universe = self.data_service.eligible_universe(limit=int(self.settings.data["backtest_max_symbols"]))
         bars = self.data_service.load_bars_many(universe["code"].tolist(), start_date, end_date)
         feeds: list[tuple[str, pd.DataFrame]] = [
@@ -242,6 +257,7 @@ class BacktestEngine:
         return result
 
     def _store(self, result: dict[str, object], parameters: dict[str, object]) -> None:
+        """把回测结果与资金曲线写入 SQLite（backtest_runs / backtest_equity 表）。"""
         self.database.execute(
             """INSERT INTO backtest_runs(id,strategy,start_date,end_date,initial_cash,final_equity,annual_return,
                max_drawdown,sharpe,win_rate,total_trades,parameters_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",

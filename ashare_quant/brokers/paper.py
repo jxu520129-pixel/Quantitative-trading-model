@@ -14,6 +14,8 @@ from .base import Broker
 
 
 class PaperBroker(Broker):
+    """基于 SQLite 的模拟券商：落地 A 股费用、T+1、整手与涨跌停限制，资金与持仓全量记账。"""
+
     account_id = "paper"
 
     def __init__(self, database: Database, settings: Settings, risk_manager: RiskManager):
@@ -28,16 +30,19 @@ class PaperBroker(Broker):
         )
 
     def get_account(self) -> Account:
+        """读取模拟账户资金快照。"""
         row = self.database.query_one("SELECT * FROM account_state WHERE account_id=?", (self.account_id,))
         if not row:
             raise RuntimeError("模拟账户尚未初始化")
         return Account(**row)
 
     def get_positions(self) -> list[Position]:
+        """读取全部非零持仓，按市值降序返回。"""
         rows = self.database.query_all("SELECT * FROM positions WHERE quantity>0 ORDER BY latest_price*quantity DESC")
         return [Position(**row) for row in rows]
 
     def submit_order(self, request: OrderRequest) -> str:
+        """校验整手后把委托以 PENDING 状态落库，返回委托 id。"""
         if request.quantity <= 0 or request.quantity % LOT_SIZE != 0:
             raise ValueError(f"A 股委托数量必须是大于 0 的 {LOT_SIZE} 股整数倍")
         self.database.execute(
@@ -49,6 +54,7 @@ class PaperBroker(Broker):
         return request.id
 
     def cancel_order(self, order_id: str) -> None:
+        """撤销一笔仍处于 PENDING 状态的委托。"""
         self.database.execute(
             "UPDATE orders SET status=?,updated_at=? WHERE id=? AND status='PENDING'",
             (OrderStatus.CANCELLED.value, utc_now_text(), order_id),
@@ -63,6 +69,7 @@ class PaperBroker(Broker):
             self.risk.reset_for_new_day(trade_date)
 
     def execute_pending_orders(self, trade_date: str) -> dict[str, int]:
+        """撮合当日待执行委托（卖出优先）：涨跌停拦截、逐笔成交/拒绝/失败，返回统计。"""
         trade_date = normalize_date(trade_date)
         rows = self.database.query_all(
             "SELECT * FROM orders WHERE status='PENDING' AND trade_date<=? ORDER BY CASE side WHEN 'SELL' THEN 0 ELSE 1 END,created_at",
@@ -109,6 +116,7 @@ class PaperBroker(Broker):
         return outcome
 
     def _fill(self, order: dict[str, Any], bar: dict[str, Any], trade_date: str) -> None:
+        """以含滑点的开盘价成交一笔委托：更新资金、持仓、成交记录（买/卖分别记账）。"""
         side = order["side"]
         raw_price = float(bar["open"])
         price = raw_price * (1 + self.costs.slippage_rate if side == "BUY" else 1 - self.costs.slippage_rate)
@@ -188,6 +196,7 @@ class PaperBroker(Broker):
             )
 
     def _reject(self, order: dict[str, Any], message: str) -> None:
+        """把委托标记为 REJECTED 并累计一次失败（用于熔断计数）。"""
         self.database.execute(
             "UPDATE orders SET status='REJECTED',error=?,updated_at=? WHERE id=?", (message, utc_now_text(), order["id"])
         )

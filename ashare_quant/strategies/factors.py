@@ -16,6 +16,7 @@ import pandas as pd
 
 
 def _momentum(frame: pd.DataFrame, window: int = 60) -> float | None:
+    """动量：最新收盘价相对 window 日前收盘价的涨跌幅（越大越强）。"""
     if len(frame) < window + 1:
         return None
     base = float(frame["close"].iloc[-window - 1])
@@ -26,11 +27,13 @@ def _momentum(frame: pd.DataFrame, window: int = 60) -> float | None:
 
 
 def _reversal(frame: pd.DataFrame, window: int = 5) -> float | None:
+    """短期反转：取 window 日动量的相反数（超涨回落、超跌反弹）。"""
     momentum = _momentum(frame, window)
     return None if momentum is None else -momentum
 
 
 def _volatility(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """波动率：近 window 日日收益率的标准差（越低越稳）。"""
     if len(frame) < window + 1:
         return None
     returns = frame["close"].astype(float).pct_change().dropna().tail(window)
@@ -40,12 +43,14 @@ def _volatility(frame: pd.DataFrame, window: int = 20) -> float | None:
 
 
 def _liquidity(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """流动性：近 window 日平均成交额（元）。"""
     if len(frame) < window:
         return None
     return float(np.nanmean(frame["amount"].astype(float).tail(window).to_numpy()))
 
 
 def _rsi(frame: pd.DataFrame, window: int = 14) -> float | None:
+    """RSI 相对强弱指标：0~100，超买偏高、超卖偏低。"""
     if len(frame) < window + 1:
         return None
     closes = frame["close"].astype(float)
@@ -62,6 +67,7 @@ def _rsi(frame: pd.DataFrame, window: int = 14) -> float | None:
 
 
 def _macd(frame: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> float | None:
+    """MACD 柱（DIF−DEA）相对现价归一化，衡量趋势动能强弱。"""
     if len(frame) < slow + signal:
         return None
     closes = frame["close"].astype(float)
@@ -72,6 +78,7 @@ def _macd(frame: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) 
 
 
 def _ma_trend(frame: pd.DataFrame, windows: tuple[int, ...] = (5, 10, 20, 60)) -> float | None:
+    """均线多头排列比例：短均线高于长均线的对数占比（0~1）。"""
     if len(frame) < max(windows):
         return None
     averages = [float(frame["close"].astype(float).tail(w).mean()) for w in windows]
@@ -80,6 +87,7 @@ def _ma_trend(frame: pd.DataFrame, windows: tuple[int, ...] = (5, 10, 20, 60)) -
 
 
 def _high_52w(frame: pd.DataFrame, window: int = 250) -> float | None:
+    """距 52 周（window 日）新高距离：最新价 / 区间最高价 − 1（越接近 0 越强）。"""
     if len(frame) < 2:
         return None
     highest = float(frame["high"].astype(float).tail(min(window, len(frame))).max())
@@ -90,6 +98,7 @@ def _high_52w(frame: pd.DataFrame, window: int = 250) -> float | None:
 
 
 def _atr(frame: pd.DataFrame, window: int = 14) -> float | None:
+    """ATR 真实波幅均值相对现价归一化，衡量波动幅度。"""
     if len(frame) < window + 1:
         return None
     high = frame["high"].astype(float)
@@ -104,6 +113,7 @@ def _atr(frame: pd.DataFrame, window: int = 14) -> float | None:
 
 
 def _amihud(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """Amihud 非流动性：近 window 日 |收益率|/成交额 的均值（越大越不流动）。"""
     if len(frame) < window + 1:
         return None
     amount = frame["amount"].astype(float).replace(0.0, np.nan)

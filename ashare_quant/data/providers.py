@@ -19,6 +19,7 @@ T = TypeVar("T")
 
 
 def with_retry(attempts: int = 3, delay_seconds: float = 1.5) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """重试装饰器：数据接口失败时按指数退避重试，最终仍失败则抛出最后一次异常。"""
     def decorator(function: Callable[..., T]) -> Callable[..., T]:
         def wrapped(*args: Any, **kwargs: Any) -> T:
             last_error: Exception | None = None
@@ -39,6 +40,8 @@ def with_retry(attempts: int = 3, delay_seconds: float = 1.5) -> Callable[[Calla
 
 
 class MarketDataProvider(ABC):
+    """行情数据源抽象契约：证券列表、日线、实时报价三种能力。"""
+
     name: str
 
     @abstractmethod
@@ -55,6 +58,7 @@ class MarketDataProvider(ABC):
 
 
 def _with_exchange_prefix(code: str) -> str:
+    """给 6 位代码补上交易所前缀（sh/sz），供 AkShare 接口使用。"""
     code = str(code).zfill(6)
     return ("sh" if code.startswith(("5", "6", "9")) else "sz") + code
 
@@ -102,6 +106,8 @@ def sina_spot_prices(codes: list[str], timeout: float = 5.0) -> dict[str, float]
 
 
 class AkShareProvider(MarketDataProvider):
+    """主数据源：基于 AkShare 提供证券列表、日线（前复权）与实时快照。"""
+
     name = "akshare"
 
     def __init__(self, attempts: int = 3):
@@ -109,6 +115,7 @@ class AkShareProvider(MarketDataProvider):
 
     @staticmethod
     def _ak() -> Any:
+        """惰性导入 AkShare（失败时给出安装提示）。"""
         try:
             import akshare as ak
         except ImportError as error:
@@ -175,7 +182,7 @@ class AkShareProvider(MarketDataProvider):
 
 
 class TushareProvider(MarketDataProvider):
-    """Fallback source. It remains inactive unless TUSHARE_TOKEN is configured."""
+    """备用数据源：仅在配置 TUSHARE_TOKEN 时启用；不支持实时行情（由上层回退 AkShare）。"""
 
     name = "tushare"
 
@@ -186,6 +193,7 @@ class TushareProvider(MarketDataProvider):
         self.api_url = api_url
 
     def _pro(self) -> Any:
+        """构建 Tushare pro 客户端；配置了第三方代理地址时覆盖请求入口。"""
         try:
             import tushare as ts
         except ImportError as error:

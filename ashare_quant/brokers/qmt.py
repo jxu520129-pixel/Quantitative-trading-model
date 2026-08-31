@@ -21,6 +21,7 @@ class QMTBroker(Broker):
         self.path = path
 
     def _not_implemented(self):
+        """统一抛错：提示需接入本地 xtquant 客户端并实现账户绑定。"""
         raise NotImplementedError("请接入本地 xtquant 客户端，并为当前 QMT 账户实现此券商适配器")
 
     def get_account(self):

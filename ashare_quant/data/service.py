@@ -19,6 +19,8 @@ LOG = logging.getLogger(__name__)
 
 
 class DataService:
+    """数据服务层：证券池维护、日线增量更新与缓存读写，主源失败时回退备用源。"""
+
     def __init__(self, database: Database, settings: Settings):
         self.database = database
         self.settings = settings
@@ -28,7 +30,7 @@ class DataService:
         )
 
     def refresh_universe(self) -> int:
-        """Fetch basic securities, retaining V1 supported instruments only."""
+        """拉取并落库证券列表（仅保留 V1 支持标的），并尽力刷新指数成分股。"""
         frame = self._with_fallback("list_securities")
         if frame.empty:
             return 0
@@ -113,6 +115,7 @@ class DataService:
         return result
 
     def store_bars(self, code: str, frame: pd.DataFrame) -> int:
+        """清洗并落库单只标的日线（按交易日去重、UPSERT），返回写入条数。"""
         if frame.empty:
             return 0
         cleaned = frame.copy()
@@ -133,6 +136,7 @@ class DataService:
         return len(rows)
 
     def load_bars(self, code: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """加载单只标的日线（按日期升序，以 trade_date 为索引）。"""
         clauses = ["code=?"]
         params: list[str] = [code]
         if start_date:
@@ -186,10 +190,11 @@ class DataService:
         return frames
 
     def latest_bar(self, code: str) -> dict[str, object] | None:
+        """返回单只标的最新一根日线（无数据返回 None）。"""
         return self.database.query_one("SELECT * FROM daily_bars WHERE code=? ORDER BY trade_date DESC LIMIT 1", (code,))
 
     def refresh_quotes(self, codes: list[str]) -> int:
-        """Refresh the 09:35 execution snapshot used by the paper broker."""
+        """拉取给定标的的实时快照并写入 market_quotes 表（供模拟成交与盘中扫描使用）。"""
         frame = self.primary.realtime_quotes(codes)
         if frame.empty:
             return 0
@@ -236,10 +241,12 @@ class DataService:
         return pd.DataFrame(self.database.query_all(query, params))
 
     def has_data(self) -> bool:
+        """判断日线表是否已有任何数据（用于决定是否先生成演示行情）。"""
         row = self.database.query_one("SELECT COUNT(*) AS count FROM daily_bars")
         return bool(row and row["count"])
 
     def _with_fallback(self, method: str, *args: object) -> pd.DataFrame:
+        """调用主数据源，失败时自动回退到 Tushare 备用源（无备用源则抛错）。"""
         try:
             return getattr(self.primary, method)(*args)
         except Exception as primary_error:

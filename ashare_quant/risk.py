@@ -11,16 +11,21 @@ from .models import OrderRequest, OrderSide, utc_now_text
 
 @dataclass(frozen=True)
 class RiskDecision:
+    """一次风控判定的结果：是否放行 + 拒绝原因。"""
+
     allowed: bool
     reason: str = ""
 
 
 class RiskManager:
+    """交易前与账户级风控：仓位、现金、T+1、日亏损、连续失败熔断。"""
+
     def __init__(self, database: Database, settings: Settings):
         self.database = database
         self.settings = settings
 
     def reset_for_new_day(self, trade_date: str) -> None:
+        """新交易日的幂等重置：清空失败计数、日内停开与暂停状态（跨日才执行）。"""
         state = self.database.query_one("SELECT last_reset_date FROM risk_state WHERE account_id='paper'")
         if state and state["last_reset_date"] == trade_date:
             return
@@ -30,6 +35,7 @@ class RiskManager:
         )
 
     def pre_trade_check(self, request: OrderRequest, estimate_price: float) -> RiskDecision:
+        """委托前逐项校验，任一不满足即拒绝并给出原因。"""
         state = self.database.query_one("SELECT * FROM risk_state WHERE account_id='paper'") or {}
         if state.get("paused"):
             return RiskDecision(False, "连续执行失败，交易已暂停")
@@ -84,6 +90,7 @@ class RiskManager:
             self.record_event("WARNING", "DAILY_LOSS", f"当日亏损 {loss:.2%}，已停止新开仓")
 
     def record_failure(self, message: str, code: str = "") -> None:
+        """累计一次执行失败；连续失败达到阈值时暂停交易并记录风险事件。"""
         state = self.database.query_one("SELECT failure_count FROM risk_state WHERE account_id='paper'") or {"failure_count": 0}
         failures = int(state["failure_count"]) + 1
         paused = int(failures >= int(self.settings.risk["max_consecutive_failures"]))
@@ -95,9 +102,11 @@ class RiskManager:
         self.record_event("ERROR", category, message, code)
 
     def record_success(self) -> None:
+        """成交成功后清零连续失败计数。"""
         self.database.execute("UPDATE risk_state SET failure_count=0,updated_at=? WHERE account_id='paper'", (utc_now_text(),))
 
     def record_event(self, level: str, category: str, message: str, code: str = "") -> None:
+        """写一条风险事件到 risk_events 表（供看板/审计回溯）。"""
         self.database.execute(
             "INSERT INTO risk_events(event_time,level,category,message,code) VALUES(?,?,?,?,?)",
             (utc_now_text(), level, category, message, code),
