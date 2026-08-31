@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from datetime import timedelta
 from typing import Iterable
 
@@ -64,7 +63,7 @@ class DataService:
         return len(rows)
 
     def update_daily(self, codes: Iterable[str] | None = None, end_date: str | None = None) -> dict[str, int]:
-        """Incrementally update daily bars. A failed symbol does not stop the batch."""
+        """增量更新日线：并发拉取（并发数由 data.update_concurrency 控制），失败标的隔离不影响整体。"""
         if codes is None:
             eligible = self.eligible_universe(limit=int(self.settings.data["max_update_symbols"]))
             codes = eligible["code"].tolist()
@@ -78,8 +77,8 @@ class DataService:
             row["code"]: row["last_date"]
             for row in self.database.query_all("SELECT code, MAX(trade_date) AS last_date FROM daily_bars GROUP BY code")
         }
-        result = {"updated_symbols": 0, "bars": 0, "failed": 0}
-        for code in normalized:
+
+        def _update_one(code: str) -> dict[str, int]:
             security_type = security_types.get(code, "STOCK")
             previous = last_dates.get(code)
             if previous:
@@ -89,12 +88,28 @@ class DataService:
             try:
                 frame = self._with_fallback("daily_bars", code, start, end_date or today_text(), security_type)
                 count = self.store_bars(code, frame)
-                result["updated_symbols"] += 1
-                result["bars"] += count
+                return {"updated": 1, "bars": count, "failed": 0}
             except Exception as error:
-                result["failed"] += 1
                 LOG.exception("证券 %s 日线更新失败：%s", code, error)
-            time.sleep(0.4)
+                return {"updated": 0, "bars": 0, "failed": 1}
+
+        concurrency = int(self.settings.data.get("update_concurrency", 4) or 4)
+        result = {"updated_symbols": 0, "bars": 0, "failed": 0}
+        if concurrency <= 1 or len(normalized) <= 1:
+            for code in normalized:
+                item = _update_one(code)
+                result["updated_symbols"] += item["updated"]
+                result["bars"] += item["bars"]
+                result["failed"] += item["failed"]
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [pool.submit(_update_one, code) for code in normalized]
+                for future in as_completed(futures):
+                    item = future.result()
+                    result["updated_symbols"] += item["updated"]
+                    result["bars"] += item["bars"]
+                    result["failed"] += item["failed"]
         return result
 
     def store_bars(self, code: str, frame: pd.DataFrame) -> int:

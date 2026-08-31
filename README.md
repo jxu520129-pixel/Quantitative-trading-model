@@ -86,7 +86,7 @@ python -m ashare_quant.cli generate-signals --strategy momentum_rotation
 python -m ashare_quant.cli queue-orders
 ```
 
-AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试；Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。若使用 Tushare 第三方付费代理，可在 `.env` 设置 `TUSHARE_API_URL`（留空则走官方 `api.tushare.pro`；代理到期接口报错时系统自动退回 AkShare 主源）。生产环境应先用少量代码测试：
+AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 4）并发拉取日线，全市场增量更新从原先串行的数小时缩短到约二三十分钟；数据源频繁报错/限流时可把该值调到 1~2（1=串行）。Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。若使用 Tushare 第三方付费代理，可在 `.env` 设置 `TUSHARE_API_URL`（留空则走官方 `api.tushare.pro`；代理到期接口报错时系统自动退回 AkShare 主源）。生产环境应先用少量代码测试：
 
 ```powershell
 python -m ashare_quant.cli update-data --codes 600000,600036,510300
