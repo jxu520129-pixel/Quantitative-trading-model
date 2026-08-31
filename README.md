@@ -19,13 +19,15 @@
 │   ├── database.py              # SQLite 表结构与访问层
 │   ├── event_similarity.py      # 事件相似度检索与历史表现回溯
 │   ├── ml_model.py              # 主升概率模型（GBDT 基线 + 重训管线）
+│   ├── hot_strategy.py          # 短线人气·热度共振（四维共振打分，日线近似回测）
+│   ├── limit_pullback_strategy.py # 涨停回马枪·冲高回调低吸（日线近似回测）
 │   ├── market_rules.py          # 费用、整手、涨跌停规则
 │   ├── notifications.py         # 企业微信与邮件
 │   ├── risk.py                  # 交易前和账户风控
 │   └── scheduler.py             # 09:35/15:20/15:35 调度
 ├── config/default.yaml          # 非敏感默认配置
 ├── deploy/                      # systemd 与 cron 示例
-├── scripts/                     # Windows 任务计划安装脚本
+├── scripts/                     # Windows 任务计划 + 历史数据拉取 + 短线策略回测脚本
 ├── tests/                       # 核心流程测试
 ├── .streamlit/config.toml       # 黑色主题
 ├── dashboard.py                 # Streamlit 操作看板
@@ -75,7 +77,7 @@ python -m ashare_quant.cli generate-signals --strategy momentum_rotation
 python -m ashare_quant.cli queue-orders
 ```
 
-AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试；Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。生产环境应先用少量代码测试：
+AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试；Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。若使用 Tushare 第三方付费代理，可在 `.env` 设置 `TUSHARE_API_URL`（留空则走官方 `api.tushare.pro`；代理到期接口报错时系统自动退回 AkShare 主源）。生产环境应先用少量代码测试：
 
 ```powershell
 python -m ashare_quant.cli update-data --codes 600000,600036,510300
@@ -126,6 +128,49 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 
 因子窗口等参数可用 `{因子名}_{参数名}` 覆盖，例如在 `strategies` 下设置 `momentum_window: 120` 或 `macd_fast: 10`。
 
+## 短线情绪策略（人气热度共振 × 涨停回马枪）
+
+系统内置两个短线情绪/形态策略，均为**日线近似回测**（盘中的人气榜、封板时间、炸板次数、换手率等无法历史回填，按策略文档口径用日线近似）。核心实现分别在 `ashare_quant/hot_strategy.py` 与 `ashare_quant/limit_pullback_strategy.py`，策略设计文档见《短线人气题材选股策略.md》《涨停冲高回调低吸策略.md》。
+
+### 短线人气·热度共振
+
+对全市场 A 股用「人气 + 题材 + 涨停 + 资金」四维共振打分，选出总分最高的少数强势股，按状态自动标注参与方式（首板打板 / 半路买入 / 低吸埋伏 / 连板接力）。日线近似下：人气分用当日涨幅横截面分位代理，题材热度用「板块涨停聚集 ≥3 家 + 板块涨幅领先前 10」判定，资金量能用量比。叠加情绪周期风控（冰点空仓）与竞价缺口过滤。
+
+> 注意：该策略是盘中实时型，人气榜只有实时前 100、无法历史回填，日线近似回测会系统性偏向「追涨」，结果不代表真实表现；应按文档 §10 用模拟盘信号记录验证，而非依赖日线回测。
+
+### 涨停回马枪·冲高回调低吸
+
+形态链路：涨停启动(T) → 次日冲高确认(H，冲高 ≥5% 且创 20 日新高) → 缩量回调(H+1~H+8) → 双信号止跌(①缩量十字星/小阳 + ②放量阳线收复 5 日线) → 尾盘低吸。叠加大盘闸门（上证 ≥MA20、前日涨停 ≥50 家、跌停 ≤10 家等）、前高减半 + 移动止盈 + 硬止损风控。
+
+**回测结果**（全市场 5216 只、2024-01~2026-08，前复权，含佣金/印花税/T+1/滑点）：
+
+| 指标 | 优化前 | 优化后 |
+|---|---|---|
+| 年化收益 | -6.09% | **+8.79%** |
+| 最大回撤 | -17.33% | **-5.56%** |
+| 胜率 | 35.06% | **62.50%** |
+
+分年度稳健：2024 +1.86% / 2025 +10.51% / 2026 +11.79%（三年全正）。优化要点：修复「前高减半」bug、移动止盈仅在浮盈后生效、信号②放量门槛 1.5→2.0、信号①缩量门槛 0.5→0.4、打分阈值 50→70，并修复 `_load_panels` 日期格式 bug（此前 end_date 所在年份数据被字符串比较误滤）。
+
+### 回测命令与脚本
+
+```powershell
+python -m ashare_quant.cli hot-backtest        # 人气热度共振回测（落库供看板展示）
+python -m ashare_quant.cli pullback-backtest   # 涨停回马枪回测（落库供看板展示）
+```
+
+看板「因子实验室」内置两个策略模板（`engine=hot_score` / `engine=limit_pullback_score`），保存后即可在因子实验室里跑回测。
+
+短线策略需全市场历史日线，演示库（30 只）无法回测，可拉取全市场历史数据到独立库：
+
+```powershell
+python scripts/fetch_hist_data.py --start 2023-07-01 --end 2026-08-28   # 拉全市场日线（前复权）到 data/ashare_quant_hist.db
+python scripts/backtest_compare.py              # 基线 vs 优化对比
+python scripts/scan_pullback_params.py          # 止损/止盈/信号参数扫描
+```
+
+`fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。
+
 ## 因子实验室与盘中买点扫描
 
 看板「因子实验室」标签页提供一套自建因子的研究闭环：**建因子 → 定买卖条件 → 信号回测 → 逐笔记录**。核心引擎在 `ashare_quant/lab.py`。
@@ -133,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 ### 因子实验室
 
 - **自建/导入因子**：用 pandas 公式定义因子，如 `close/close.shift(5)-1`，可用 `open/high/low/close/volume/amount/pre_close` 列和 `shift/rolling/pct_change/ewm/diff/clip` 等方法；内置 24 个示例因子可一键导入（含箱体突破 `breakout_4`/`box_range_4`、量比 `vol_ratio`、均线偏离 `ma20_dev`/`ma60_dev` 等）。公式在 AST 白名单内求值，仅允许上述列与方法，不执行任意 Python 代码（不支持 `np`）。
-- **策略定义**：买入/离场条件用「因子 + 运算符 + 阈值」组合（AND/OR），可选固定止损/止盈、移动止损、跌破箱体高点离场；内置 3 个策略模板（箱体突破·放量确认 / 超跌反弹·量比确认 / 主升浪·启动突破）可一键导入。
+- **策略定义**：买入/离场条件用「因子 + 运算符 + 阈值」组合（AND/OR），可选固定止损/止盈、移动止损、跌破箱体高点离场；内置 3 个因子策略模板（箱体突破·放量确认 / 超跌反弹·量比确认 / 主升浪·启动突破）可一键导入，另有 2 个短线情绪策略引擎（`engine=hot_score` 人气热度共振 / `engine=limit_pullback_score` 涨停回马枪）直接走 `hot_strategy.py` / `limit_pullback_strategy.py` 回测。
 - **信号回测**：选历史时间段跑多标的逐日回测（第 T 日信号、第 T+1 日开盘成交，无未来函数），含手续费/T+1，输出收益、回撤、胜率、资金曲线与逐笔交易，并写入 SQLite。支持「总仓位比例」控制暴露、压降回撤。
 
 ### 盘中买点扫描与邮件
