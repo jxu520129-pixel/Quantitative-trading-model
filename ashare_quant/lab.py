@@ -123,7 +123,7 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]
         "涨停回马枪·冲高回调低吸（形态模型）：收盘封死涨停(首板~2板，剔一字) → 次日冲高≥5%创20日新高 → "
         "缩量回调5%~15%不破涨停日最低/MA20 → 缩量十字星+放量阳线收复5日线双确认 → 尾盘低吸；"
         "前高减半+移动止盈+10日强平，大盘闸门（上证≥MA20/涨停≥50家/跌停≤10家/大跌熔断）；仅沪深主板",
-        {"engine": "limit_pullback_score", "threshold": 50, "conditions": [],
+        {"engine": "limit_pullback_score", "threshold": 70, "conditions": [],
          "description": "涨停回马枪形态引擎，代码在 ashare_quant/limit_pullback_strategy.py"},
         {"combine": "OR", "conditions": []},
     ),
@@ -584,11 +584,12 @@ def find_buy_candidates(
 
     # 预加载所有标的的日线（只加载一次，供所有策略复用），并用实时价覆盖最新 close
     loaded = data_service.load_bars_many(universe["code"].tolist(), end_date=as_of_date)
-    bars_cache: dict[str, tuple[str, pd.DataFrame]] = {}
+    bars_cache: dict[str, tuple[str, pd.DataFrame, str]] = {}
     for row in universe.itertuples(index=False):
         frame = loaded.get(row.code)
         if frame is None or frame.empty or len(frame) < 20:
             continue
+        realtime = False
         quote = current_quotes.get(row.code) if current_quotes else None
         if quote:
             if isinstance(quote, dict):
@@ -601,6 +602,7 @@ def find_buy_candidates(
                 frame.iloc[-1, frame.columns.get_loc("close")] = price
                 if intraday_volume > 0:
                     frame.iloc[-1, frame.columns.get_loc("volume")] = intraday_volume
+                realtime = True
         # 价格与流动性过滤（只做一次，供所有策略复用）
         effective_price = float(frame["close"].iloc[-1])
         if max_price is not None and effective_price > max_price:
@@ -611,7 +613,8 @@ def find_buy_candidates(
             continue
         if min_average_volume is not None and float(frame["volume"].tail(20).mean()) < min_average_volume:
             continue
-        bars_cache[row.code] = (row.name, frame)
+        bar_date = str(frame["trade_date"].iloc[-1].date())
+        bars_cache[row.code] = (row.name, frame, "实时" if realtime else bar_date)
 
     results: list[dict[str, Any]] = []
     for strat in strategies:
@@ -629,7 +632,7 @@ def find_buy_candidates(
         except ValueError:
             continue
         matches: list[dict[str, Any]] = []
-        for code, (name, frame) in bars_cache.items():
+        for code, (name, frame, price_date) in bars_cache.items():
             try:
                 factor_values = {fn: evaluate_factor(expr, frame) for fn, expr in exprs.items()}
                 mask = evaluate_conditions(factor_values, conditions, entry.get("combine", "AND"))
@@ -639,6 +642,7 @@ def find_buy_candidates(
                 price = float(frame["close"].iloc[-1])
                 matches.append({
                     "code": code, "name": name, "price": round(price, 2),
+                    "price_date": price_date,
                     "factors": {fn: round(float(factor_values[fn].iloc[-1]), 4) for fn in exprs},
                 })
         results.append({
@@ -782,6 +786,22 @@ def fetch_industries(database: Any, codes: list[str]) -> dict[str, str]:
     return industries
 
 
+def _price_source_note(results: list[dict[str, Any]]) -> str:
+    """根据候选的价格日期，给出行情数据来源与新鲜度说明，避免把陈旧收盘价误当实时价。"""
+    price_dates = {m.get("price_date", "") for item in results for m in item["matches"]}
+    if price_dates == {"实时"}:
+        return "行情：盘中实时价"
+    dates = sorted(d for d in price_dates if d and d != "实时")
+    if not dates:
+        return "行情：日线收盘价"
+    latest = max(dates)
+    today = pd.Timestamp.now().strftime("%Y-%m-%d")
+    note = f"行情：日线收盘价（数据截至 {latest}）"
+    if latest < today:
+        note += "　⚠️ 行情数据未更新至最新交易日，现价可能过期"
+    return note
+
+
 def format_buy_report(
     results: list[dict[str, Any]],
     notices: dict[str, list[str]] | None = None,
@@ -801,6 +821,7 @@ def format_buy_report(
     lines: list[str] = []
     lines.append(f"A股量化买点扫描 · {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"今日总览：{len(results)} 个策略命中，{total_all} 只候选（去重 {len(unique_codes)} 只）")
+    lines.append(_price_source_note(results))
     lines.append(sep)
 
     for si, item in enumerate(results, 1):
@@ -824,7 +845,11 @@ def format_buy_report(
                     industry_display = f"｜{board} {pct:+.2f}%"
                 else:
                     industry_display = f"｜{ind}"
-            lines.append(f"  {i:>2}. ¥{m['price']:>7.2f}  {m['code']}  {m['name']}{industry_display}")
+            date_tag = ""
+            price_date = m.get("price_date", "")
+            if price_date and price_date != "实时":
+                date_tag = f"（{price_date}）"
+            lines.append(f"  {i:>2}. ¥{m['price']:>7.2f}  {m['code']}  {m['name']}{industry_display}{date_tag}")
             factor_txt = "，".join(
                 f"{FACTOR_LABELS.get(k, k)} {v:+.2f}" for k, v in m.get("factors", {}).items()
             )
@@ -861,6 +886,11 @@ def format_buy_report_html(
     parts.append('<div style="background:#34495e;color:#ffffff;padding:12px 16px;border-radius:6px;">')
     parts.append(f'<h3 style="margin:0;font-size:17px;">A股量化买点扫描 · {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")}</h3>')
     parts.append(f'<p style="margin:5px 0 0;font-size:13px;opacity:0.92;">今日总览：{len(results)} 个策略命中，{total_all} 只候选（去重 {len(unique_codes)} 只）</p>')
+    source_note = _price_source_note(results)
+    if "⚠️" in source_note:
+        parts.append(f'<p style="margin:5px 0 0;font-size:13px;color:#c0392b;font-weight:600;">{esc(source_note)}</p>')
+    else:
+        parts.append(f'<p style="margin:5px 0 0;font-size:13px;opacity:0.9;">{esc(source_note)}</p>')
     parts.append('</div>')
     if sector_text:
         parts.append(f'<div style="margin:10px 0;padding:10px 14px;background:#f4f6f8;border-left:4px solid #3498db;font-size:13px;color:#333;">{esc(sector_text).replace(chr(10), "<br>")}</div>')
@@ -901,9 +931,13 @@ def format_buy_report_html(
                 industry_html = ""
             factor_txt = "，".join(f"{FACTOR_LABELS.get(k, k)} {v:+.2f}" for k, v in m.get("factors", {}).items())
             notice_txt = "；".join(notices.get(m["code"], [])[:2])
+            price_cell = f'¥{m["price"]:.2f}'
+            price_date = m.get("price_date", "")
+            if price_date and price_date != "实时":
+                price_cell += f' <span style="font-weight:400;color:#999;font-size:11px;">（{esc(price_date)}）</span>'
             parts.append(
                 f'<tr{bg}><td style="color:#999;">{i}</td>'
-                f'<td style="font-weight:700;color:#d35400;">¥{m["price"]:.2f}</td>'
+                f'<td style="font-weight:700;color:#d35400;">{price_cell}</td>'
                 f'<td>{m["code"]}</td><td>{esc(m["name"])}</td>'
                 f'<td>{industry_html}</td>'
                 f'<td style="color:#666;font-size:12px;">{esc(factor_txt)}</td>'

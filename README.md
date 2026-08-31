@@ -9,22 +9,30 @@
 ```text
 .
 ├── ashare_quant/
-│   ├── brokers/                 # 模拟券商与实盘适配边界
-│   ├── data/                    # AkShare/Tushare、缓存、清洗、演示数据
-│   ├── services/                # 信号、交易编排、运行开关
-│   ├── strategies/              # 双均线、动量轮动、多因子
-│   ├── backtest.py              # Backtrader A 股回测
-│   ├── cli.py                   # 命令行入口
-│   ├── config.py                # YAML 与环境变量配置
-│   ├── database.py              # SQLite 表结构与访问层
-│   ├── event_similarity.py      # 事件相似度检索与历史表现回溯
-│   ├── ml_model.py              # 主升概率模型（GBDT 基线 + 重训管线）
-│   ├── hot_strategy.py          # 短线人气·热度共振（四维共振打分，日线近似回测）
-│   ├── limit_pullback_strategy.py # 涨停回马枪·冲高回调低吸（日线近似回测）
-│   ├── market_rules.py          # 费用、整手、涨跌停规则
-│   ├── notifications.py         # 企业微信与邮件
-│   ├── risk.py                  # 交易前和账户风控
-│   └── scheduler.py             # 09:35/15:20/15:35 调度
+│   ├── brokers/                    # 模拟券商与实盘适配边界（paper/qmt/ptrade/easytrader）
+│   ├── data/                       # AkShare/Tushare 数据源、缓存、演示数据
+│   ├── services/                   # 信号、交易编排、运行时与控制开关
+│   ├── strategies/                 # 因子库与各策略（动量/双均线/多因子等）
+│   ├── backtest.py                 # Backtrader A 股回测
+│   ├── cli.py                      # 命令行入口
+│   ├── config.py                   # YAML 与环境变量配置
+│   ├── database.py                 # SQLite 表结构与访问层
+│   ├── event_similarity.py         # 事件相似度检索与历史表现回溯
+│   ├── fundamental.py              # 事件库与宏观指标采集（关键词打分，可选 LLM）
+│   ├── hot_strategy.py             # 短线人气·热度共振（四维共振打分，日线近似回测）
+│   ├── industry_chain.py           # 产业链关键词图谱（上下游）
+│   ├── lab.py                      # 因子实验室与盘中买点扫描引擎
+│   ├── limit_pullback_strategy.py  # 涨停回马枪·冲高回调低吸（日线近似回测）
+│   ├── main_rally.py               # 主升浪策略（事件×宏观×产业链×盈利×技术）
+│   ├── market_rules.py             # 费用、整手、涨跌停规则
+│   ├── ml_model.py                 # 主升概率模型（GBDT 基线 + 重训管线）
+│   ├── models.py                   # 数据模型（dataclass）
+│   ├── notifications.py            # 企业微信与邮件
+│   ├── presentation.py             # 看板展示与字段本地化
+│   ├── risk.py                     # 交易前和账户风控
+│   ├── scheduler.py                # 盘前/盘中/盘后/重训定时调度
+│   ├── trading_calendar.py         # 交易日历（节假日与调休休市）
+│   └── utils.py                    # 日期与通用工具
 ├── config/default.yaml          # 非敏感默认配置
 ├── deploy/                      # systemd 与 cron 示例
 ├── scripts/                     # Windows 任务计划 + 历史数据拉取 + 短线策略回测脚本
@@ -34,6 +42,7 @@
 ├── Dockerfile
 ├── .dockerignore                # 排除密钥、数据库与本机缓存
 ├── docker-compose.yml
+├── pyproject.toml
 ├── requirements.txt
 └── .env.example
 ```
@@ -87,7 +96,7 @@ python -m ashare_quant.cli update-data --codes 600000,600036,510300
 
 - `09:25`：盘前主升浪扫描——抓取全球事件（LLM 抽取 + 关键词兜底）→ 更新宏观指标 → 形成盘前候选池 → 推送富文本报告（详见「主升浪盘前扫描与富文本报告」）。
 - `09:35`：刷新待执行标的实时快照，执行模拟委托，并按 T+1 更新可卖数量。
-- `15:40`：增量更新日线；动量轮动在周五生成下周委托，其他策略按日生成次日委托。
+- `15:30`：增量更新日线；动量轮动在周五生成下周委托，其他策略按日生成次日委托。
 - `15:50`：按收盘价更新账户净值并检查日亏损限制。
 
 > 自 2026-07-06 起，A 股新增盘后固定价格交易时段（15:05–15:30，按当日收盘价成交），
@@ -130,7 +139,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 
 ## 短线情绪策略（人气热度共振 × 涨停回马枪）
 
-系统内置两个短线情绪/形态策略，均为**日线近似回测**（盘中的人气榜、封板时间、炸板次数、换手率等无法历史回填，按策略文档口径用日线近似）。核心实现分别在 `ashare_quant/hot_strategy.py` 与 `ashare_quant/limit_pullback_strategy.py`，策略设计文档见《短线人气题材选股策略.md》《涨停冲高回调低吸策略.md》。
+系统内置两个短线情绪/形态策略，均为**日线近似回测**（盘中的人气榜、封板时间、炸板次数、换手率等无法历史回填，按日线近似）。核心实现分别在 `ashare_quant/hot_strategy.py` 与 `ashare_quant/limit_pullback_strategy.py`，策略设计要点已并入下方两个小节。
 
 ### 短线人气·热度共振
 
@@ -183,7 +192,9 @@ python scripts/scan_pullback_params.py          # 止损/止盈/信号参数扫�
 
 ### 盘中买点扫描与邮件
 
-调度器在每个交易日 5 个时点（**09:40 / 10:30 / 13:30 / 14:30 / 14:50**）自动执行盘中扫描：拉取实时行情（新浪源，东方财富接口在部分网络被限），用实时价和当日累计成交量覆盖最新日线后，扫描所有已保存策略的买入候选，**仅在发现候选时发送邮件**。收盘后 15:40 的盘后流程也保留一次扫描。
+调度器在每个交易日 6 个时点（**09:37 / 10:00 / 10:30 / 14:30 / 14:50 / 15:30**）自动执行盘中扫描：拉取实时行情（新浪源，东方财富接口在部分网络被限），用实时价和当日累计成交量覆盖最新日线后，扫描所有已保存策略的买入候选，**仅在发现候选时发送邮件**。收盘后的盘后流程（15:30）也保留一次扫描。
+
+报告会标注每只候选的价格数据来源与日期：盘中扫描用实时价（标注「实时」）；盘后流程（15:30 `after_close`）不刷新实时行情，直接用日线收盘价，此时报告顶部会注明「行情：日线收盘价（数据截至 YYYY-MM-DD）」，每只候选现价后也会标注对应日期。若日线未更新到最新交易日（例如当日 `update-data` 更新失败），报告会额外给出「⚠️ 行情数据未更新至最新交易日，现价可能过期」警示，避免把陈旧收盘价误当实时价。
 
 扫描先按价格区间（`min_price` / `max_price`）和流动性（近 20 日 `min_average_amount` / `min_average_volume`）过滤，再经过质量过滤（`config/default.yaml` 的 `scan` 下可调）：仅保留当日板块上涨的候选（`min_sector_change`）、可选限定东方财富人气榜前 N（`require_hot_stock` / `hot_rank_limit`）、排除有减持/处罚/立案等负面公告的标的（`exclude_negative_notice`），从而减少出手次数、提高胜率。
 
