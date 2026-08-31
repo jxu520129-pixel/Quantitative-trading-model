@@ -178,7 +178,7 @@ python scripts/backtest_compare.py              # 基线 vs 优化对比
 python scripts/scan_pullback_params.py          # 止损/止盈/信号参数扫描
 ```
 
-`fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。
+`fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。默认以 `--workers 4` 并发预取多天数据（按日期顺序消费、保证前复权 `pre_close` 链正确），代理限流时可降到 `1`（串行）。
 
 ## 因子实验室与盘中买点扫描
 

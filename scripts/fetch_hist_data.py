@@ -82,6 +82,7 @@ def main() -> None:
     parser.add_argument("--start", default="2023-07-01")
     parser.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"))
     parser.add_argument("--db", default=str(DEFAULT_DB))
+    parser.add_argument("--workers", type=int, default=4, help="并发拉取天数（1=串行；过高可能触发代理限流）")
     args = parser.parse_args()
 
     token, url = _load_env()
@@ -164,14 +165,18 @@ def main() -> None:
             break
     print(f"前复权基准：{len(latest_adj)} 只", flush=True)
 
-    # 4) 逐日拉 daily + adj_factor，当场前复权并流式写库
+    # 4) 逐日拉 daily + adj_factor，当场前复权并流式写库（并发预取，按日期顺序消费）
     prev_close_cache: dict[str, float] = {}
     total_bars = 0
     t0 = time.time()
-    for idx, d in enumerate(trade_days, 1):
+
+    def _fetch_day(d: str):
         _, daily_items = _call("daily", token, url, {"trade_date": d},
                                "ts_code,open,high,low,close,vol,amount")
         _, adj_items = _call("adj_factor", token, url, {"trade_date": d}, "ts_code,adj_factor")
+        return daily_items, adj_items
+
+    def _process_day(d: str, daily_items, adj_items) -> int:
         adj_today = {it[0].split(".")[0]: float(it[1]) for it in adj_items}
         bar_rows = []
         for it in daily_items:
@@ -189,10 +194,34 @@ def main() -> None:
         conn.executemany(
             "INSERT INTO daily_bars(code,trade_date,open,high,low,close,volume,amount,pre_close,source)"
             " VALUES(?,?,?,?,?,?,?,?,?,?)", bar_rows)
-        total_bars += len(bar_rows)
-        if idx % 20 == 0:
-            conn.commit()
-            print(f"  进度 {idx}/{len(trade_days)}，累计 {total_bars} 条，用时 {time.time()-t0:.0f}s", flush=True)
+        return len(bar_rows)
+
+    workers = max(1, args.workers)
+    if workers > 1 and len(trade_days) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pending: dict[str, object] = {}
+            for d in trade_days[:workers]:
+                pending[d] = pool.submit(_fetch_day, d)
+            next_i = workers
+            for idx, d in enumerate(trade_days, 1):
+                daily_items, adj_items = pending[d].result()
+                del pending[d]
+                if next_i < len(trade_days):
+                    nd = trade_days[next_i]
+                    pending[nd] = pool.submit(_fetch_day, nd)
+                    next_i += 1
+                total_bars += _process_day(d, daily_items, adj_items)
+                if idx % 20 == 0:
+                    conn.commit()
+                    print(f"  进度 {idx}/{len(trade_days)}，累计 {total_bars} 条，用时 {time.time()-t0:.0f}s", flush=True)
+    else:
+        for idx, d in enumerate(trade_days, 1):
+            daily_items, adj_items = _fetch_day(d)
+            total_bars += _process_day(d, daily_items, adj_items)
+            if idx % 20 == 0:
+                conn.commit()
+                print(f"  进度 {idx}/{len(trade_days)}，累计 {total_bars} 条，用时 {time.time()-t0:.0f}s", flush=True)
     conn.commit()
     print(f"完成：{total_bars} 条日线，数据库 {db_path}", flush=True)
     conn.close()
