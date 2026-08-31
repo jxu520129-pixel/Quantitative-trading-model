@@ -180,6 +180,8 @@ python scripts/scan_pullback_params.py          # 止损/止盈/信号参数扫�
 
 `fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。默认以 `--workers 4` 并发预取多天数据（按日期顺序消费、保证前复权 `pre_close` 链正确），代理限流时可降到 `1`（串行）。
 
+> `hist` 库与默认演示库有三个数据口径差异，直接写回测/查询脚本时需注意：① `trade_date` 为 `YYYYMMDD` 紧凑格式（SQL 字符串比较勿用 `YYYY-MM-DD`，否则会静默漏掉后续年份数据）；② `amount` 单位是「千元」（默认演示库是「元」），成交额过滤阈值需按千元填（2000 万 = `20000`）；③ 次新股（创业板/科创板）前复权可能因 `adj_factor` 缺失出现单日 ±30% 以上假收益，`ashare_quant/portfolio.py` 加载时已自动过滤。
+
 ## 因子实验室与盘中买点扫描
 
 看板「因子实验室」标签页提供一套自建因子的研究闭环：**建因子 → 定买卖条件 → 信号回测 → 逐笔记录**。核心引擎在 `ashare_quant/lab.py`。
