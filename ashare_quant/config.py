@@ -38,6 +38,7 @@ class Settings:
     smtp_password: str
     email_to: str
     dashboard_password: str
+    tushare_api_url: str = ""
 
     @property
     def trading(self) -> dict[str, Any]:
@@ -92,6 +93,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         db_path=db_path,
         mode=mode,
         tushare_token=os.getenv("TUSHARE_TOKEN", ""),
+        tushare_api_url=os.getenv("TUSHARE_API_URL", ""),
         wecom_webhook=os.getenv("WECOM_WEBHOOK", ""),
         smtp_host=os.getenv("SMTP_HOST", ""),
         smtp_port=int(os.getenv("SMTP_PORT", "465")),

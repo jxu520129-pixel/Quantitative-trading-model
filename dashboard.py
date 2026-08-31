@@ -10,7 +10,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, BUILTIN_STRATEGY_TEMPLATES, build_buy_report, evaluate_factor, resolve_factor_expressions, run_signal_backtest
+from ashare_quant.hot_strategy import run_hot_backtest
+from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest
+from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, BUILTIN_STRATEGY_TEMPLATES, build_buy_report, evaluate_factor, fetch_scan_quotes, resolve_factor_expressions, run_signal_backtest
+from ashare_quant.data.providers import sina_spot_prices
 from ashare_quant.models import utc_now_text
 from ashare_quant.services.runtime import build_runtime
 from ashare_quant.services.trading import next_weekday
@@ -321,32 +324,63 @@ with lab_tab:
         if st.button("运行回测", disabled=not is_admin):
             try:
                 entry_cfg = json.loads(strategy_row["entry_json"])
-                exit_cfg = json.loads(strategy_row["exit_json"])
-                factor_names = [c["factor"] for c in entry_cfg["conditions"]] + [c["factor"] for c in exit_cfg["conditions"]]
-                exprs = resolve_factor_expressions(app.database, factor_names)
-                trades, metrics, equity = run_signal_backtest(
-                    app.data, app.settings, exprs, entry_cfg, exit_cfg,
-                    lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
-                    initial_cash=float(lab_cash), max_positions=int(lab_maxpos), exposure=float(lab_exposure),
-                )
-                run_id = uuid4().hex
-                app.database.execute(
-                    """INSERT INTO signal_backtest_runs(id,strategy_name,start_date,end_date,metrics_json,created_at)
-                       VALUES(?,?,?,?,?,?)""",
-                    (run_id, selected_strategy_name, lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
-                     json.dumps(metrics, ensure_ascii=False), utc_now_text()),
-                )
-                app.database.executemany(
-                    """INSERT INTO signal_trades(run_id,code,name,entry_date,entry_price,shares,exit_date,exit_price,pnl,pnl_pct,holding_days,status,entry_reason,exit_reason)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    [(run_id, t["code"], t["name"], t["entry_date"], t["entry_price"], t["shares"], t["exit_date"],
-                      t["exit_price"], t["pnl"], t["pnl_pct"], t["holding_days"], t["status"], t["entry_reason"], t["exit_reason"])
-                     for t in trades],
-                )
-                st.session_state["lab_trades"] = trades
-                st.session_state["lab_metrics"] = metrics
-                st.session_state["lab_equity"] = equity
-                st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
+                engine = entry_cfg.get("engine")
+                if engine == "hot_score":
+                    hot_metrics = run_hot_backtest(
+                        app.database, app.data, start_date=lab_start.strftime("%Y-%m-%d"),
+                        end_date=lab_end.strftime("%Y-%m-%d"), threshold=float(entry_cfg.get("threshold", 75)),
+                        max_positions=int(lab_maxpos), initial_cash=float(lab_cash),
+                        daily_budget=float(lab_exposure), sentiment_scope=str(entry_cfg.get("sentiment_scope", "hs")),
+                    )
+                elif engine == "limit_pullback_score":
+                    hot_metrics = run_limit_pullback_backtest(
+                        app.database, app.data, start_date=lab_start.strftime("%Y-%m-%d"),
+                        end_date=lab_end.strftime("%Y-%m-%d"), threshold=float(entry_cfg.get("threshold", 50)),
+                        max_positions=int(lab_maxpos), initial_cash=float(lab_cash),
+                        daily_budget=float(lab_exposure),
+                    )
+                else:
+                    hot_metrics = None
+                if hot_metrics is not None:
+                    equity = hot_metrics.pop("equity", [])
+                    trades = hot_metrics.pop("trades", [])
+                    metrics = {
+                        "total_trades": hot_metrics["total_trades"], "win_rate": hot_metrics["win_rate"],
+                        "total_pnl": hot_metrics["final_equity"] - hot_metrics["initial_cash"],
+                        "total_return": hot_metrics["final_equity"] / hot_metrics["initial_cash"] - 1,
+                        "max_drawdown": hot_metrics["max_drawdown"],
+                    }
+                    st.session_state["lab_trades"] = trades
+                    st.session_state["lab_metrics"] = metrics
+                    st.session_state["lab_equity"] = equity
+                    st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
+                else:
+                    exit_cfg = json.loads(strategy_row["exit_json"])
+                    factor_names = [c["factor"] for c in entry_cfg["conditions"]] + [c["factor"] for c in exit_cfg["conditions"]]
+                    exprs = resolve_factor_expressions(app.database, factor_names)
+                    trades, metrics, equity = run_signal_backtest(
+                        app.data, app.settings, exprs, entry_cfg, exit_cfg,
+                        lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
+                        initial_cash=float(lab_cash), max_positions=int(lab_maxpos), exposure=float(lab_exposure),
+                    )
+                    run_id = uuid4().hex
+                    app.database.execute(
+                        """INSERT INTO signal_backtest_runs(id,strategy_name,start_date,end_date,metrics_json,created_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (run_id, selected_strategy_name, lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
+                         json.dumps(metrics, ensure_ascii=False), utc_now_text()),
+                    )
+                    app.database.executemany(
+                        """INSERT INTO signal_trades(run_id,code,name,entry_date,entry_price,shares,exit_date,exit_price,pnl,pnl_pct,holding_days,status,entry_reason,exit_reason)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        [(run_id, t["code"], t["name"], t["entry_date"], t["entry_price"], t["shares"], t["exit_date"],
+                          t["exit_price"], t["pnl"], t["pnl_pct"], t["holding_days"], t["status"], t["entry_reason"], t["exit_reason"])
+                         for t in trades],
+                    )
+                    st.session_state["lab_trades"] = trades
+                    st.session_state["lab_metrics"] = metrics
+                    st.session_state["lab_equity"] = equity
+                    st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
             except Exception as error:
                 st.error(str(error))
 
@@ -381,9 +415,7 @@ with lab_tab:
     if st.button("立即扫描买点", disabled=not is_admin):
         with st.spinner("正在拉取实时行情、公告与板块数据..."):
             try:
-                universe = app.data.eligible_universe(limit=int(app.settings.data["strategy_scan_symbols"]))
-                app.data.refresh_quotes(universe["code"].tolist())
-                quotes = {str(q["code"]): float(q["price"]) for q in app.database.query_all("SELECT code, price FROM market_quotes WHERE price>0")}
+                quotes = fetch_scan_quotes(app.data, app.database)
                 has_candidates, report, html = build_buy_report(app.data, app.database, current_quotes=quotes)
                 if has_candidates:
                     app.notifications.send("盘中买点扫描", report, "INFO", html=html)
@@ -399,17 +431,119 @@ with overview:
     if equity.empty:
         st.info("暂无账户净值记录")
     else:
+        for column in ["total_equity", "cash", "market_value"]:
+            equity[column] = pd.to_numeric(equity[column], errors="coerce")
+        latest = equity.iloc[-1]
+        prev = equity.iloc[-2] if len(equity) > 1 else latest
+        initial_cash = float(app.settings.trading.get("paper_initial_cash") or 0) or float(equity["total_equity"].iloc[0] or 1)
+        prev_equity = float(prev["total_equity"] or 0)
+        day_change = float(latest["total_equity"] or 0) - prev_equity
+        day_change_pct = day_change / prev_equity if prev_equity > 0 else 0.0
+        cumulative_return = float(latest["total_equity"] or 0) / initial_cash - 1
+        equity_peak = equity["total_equity"].cummax()
+        max_drawdown = float(((equity["total_equity"] - equity_peak) / equity_peak).min())
+        position_ratio = float(latest["market_value"] or 0) / float(latest["total_equity"]) if latest["total_equity"] else 0.0
+        cards = st.columns(5)
+        cards[0].metric("最新总资产", f"¥{latest['total_equity']:,.2f}")
+        cards[1].metric("较前一交易日", f"¥{day_change:+,.2f}", f"{day_change_pct:+.2%}", delta_color="inverse")
+        cards[2].metric("累计收益率", f"{cumulative_return:+.2%}", f"¥{float(latest['total_equity']) - initial_cash:+,.2f}", delta_color="inverse")
+        cards[3].metric("最大回撤", f"{max_drawdown:.2%}", help="统计区间内净值相对历史高点的最大跌幅")
+        cards[4].metric("仓位占比", f"{position_ratio:.1%}", help="持仓市值 / 总资产")
         display_equity = localize_dataframe(equity)
+        st.caption(
+            f"统计区间 {display_equity['净值日期'].iloc[0]} 至 {display_equity['净值日期'].iloc[-1]}"
+            f" · 共 {len(equity)} 个交易日 · 初始资金 ¥{initial_cash:,.0f}"
+        )
+        st.subheader("累计收益率（%）")
+        returns_frame = pd.DataFrame({
+            "净值日期": display_equity["净值日期"],
+            "累计收益率": (equity["total_equity"] / initial_cash - 1) * 100,
+        })
+        st.line_chart(returns_frame, x="净值日期", y="累计收益率", color="#36C98F")
+        st.subheader("资产构成")
         st.line_chart(display_equity, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#36C98F", "#8A99A6", "#E7B85C"])
 with holdings:
-    positions_frame = frame(
-        """SELECT code,name,quantity,sellable_quantity,avg_cost,latest_price,
-           ROUND(quantity*latest_price,2) AS market_value,
-           ROUND((latest_price-avg_cost)*quantity,2) AS unrealized_pnl FROM positions ORDER BY market_value DESC"""
+    refresh_seconds = st.selectbox(
+        "浮动盈亏实时刷新间隔（秒，0=暂停刷新）",
+        [10, 5, 15, 30, 60, 0],
+        key="holdings_refresh_seconds",
     )
-    st.dataframe(localize_dataframe(positions_frame), width="stretch", hide_index=True)
-    if not positions_frame.empty:
-        close_code = st.selectbox("手动平仓标的", positions_frame["code"].tolist(), disabled=not is_admin)
+
+    def _pnl_color(value: float) -> str:
+        if value > 0:
+            return "color: #ff6b6b"
+        if value < 0:
+            return "color: #36C98F"
+        return ""
+
+    def _pct_text(value) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        return f"{value * 100:+.2f}%"
+
+    @st.fragment(run_every=None if refresh_seconds == 0 else int(refresh_seconds))
+    def _live_holdings():
+        rows = app.database.query_all(
+            "SELECT code,name,quantity,sellable_quantity,avg_cost,latest_price "
+            "FROM positions WHERE quantity>0 ORDER BY latest_price*quantity DESC"
+        )
+        quotes: dict[str, float] = {}
+        live_ok = False
+        if rows:
+            try:
+                quotes = sina_spot_prices([row["code"] for row in rows])
+                live_ok = bool(quotes)
+            except Exception:
+                quotes = {}
+        records = []
+        for row in rows:
+            price = float(quotes.get(row["code"]) or row["latest_price"] or 0)
+            cost = float(row["avg_cost"] or 0)
+            quantity = int(row["quantity"])
+            records.append({
+                "证券代码": row["code"],
+                "证券名称": row["name"],
+                "数量": quantity,
+                "可卖数量": int(row["sellable_quantity"]),
+                "持仓成本": cost,
+                "最新价格": price,
+                "持仓市值": quantity * price,
+                "浮动盈亏": (price - cost) * quantity,
+                "盈亏比例": price / cost - 1 if cost > 0 else None,
+            })
+        if not records:
+            st.info("暂无持仓")
+            return
+        view = pd.DataFrame(records)
+        total_pnl = float(view["浮动盈亏"].sum())
+        total_color = "#ff6b6b" if total_pnl > 0 else "#36C98F" if total_pnl < 0 else "#e6edf3"
+        source = "新浪实时行情" if live_ok else "数据库收盘价（实时行情暂不可用）"
+        updated = pd.Timestamp.now().strftime("%H:%M:%S")
+        st.markdown(
+            f"<span style='font-size:0.92rem'>{source} · 上次更新 {updated} · "
+            f"合计浮动盈亏 <b style='color:{total_color}'>¥{total_pnl:+,.2f}</b></span>",
+            unsafe_allow_html=True,
+        )
+        st.dataframe(
+            view.style.format({
+                "持仓成本": "{:.4f}",
+                "最新价格": "{:.2f}",
+                "持仓市值": "{:,.2f}",
+                "浮动盈亏": "{:+,.2f}",
+                "盈亏比例": _pct_text,
+            }).map(_pnl_color, subset=["浮动盈亏", "盈亏比例"]),
+            width="stretch",
+            hide_index=True,
+        )
+
+    _live_holdings()
+    position_codes = [
+        row["code"] for row in app.database.query_all(
+            "SELECT code FROM positions WHERE quantity>0 ORDER BY latest_price*quantity DESC"
+        )
+    ]
+    if position_codes:
+        close_code = st.selectbox("手动平仓标的", position_codes, disabled=not is_admin)
         if st.button("提交全量平仓委托", disabled=not is_admin):
             try:
                 order_id = app.trading.queue_manual_close(close_code)

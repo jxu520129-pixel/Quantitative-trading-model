@@ -24,7 +24,9 @@ class DataService:
         self.database = database
         self.settings = settings
         self.primary: MarketDataProvider = AkShareProvider()
-        self.fallback: MarketDataProvider | None = TushareProvider(settings.tushare_token) if settings.tushare_token else None
+        self.fallback: MarketDataProvider | None = (
+            TushareProvider(settings.tushare_token, settings.tushare_api_url) if settings.tushare_token else None
+        )
 
     def refresh_universe(self) -> int:
         """Fetch basic securities, retaining V1 supported instruments only."""

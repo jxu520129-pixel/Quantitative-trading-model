@@ -16,6 +16,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .hot_strategy import HOT_STRATEGY_NAME
+from .limit_pullback_strategy import LIMIT_STRATEGY_NAME
 from .market_rules import TradingCosts, round_to_lot
 
 
@@ -75,6 +77,8 @@ BUILTIN_FACTOR_FORMULAS: dict[str, tuple[str, str]] = {
 # 内置策略模板：名称 -> (说明, entry_json, exit_json)。可在看板「因子实验室」一键导入。
 # 止损/止盈等比例均为小数（0.08 = 8%），与看板保存策略口径一致。
 BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]] = {
+    # 名称与 hot_strategy.HOT_STRATEGY_NAME 保持一致；entry_json 带 engine=hot_score，
+    # 因子条件扫描会自动跳过，回测与运行由 ③/打分引擎按引擎标记分派。
     "箱体突破·放量确认": (
         "收盘突破前4日高点 + 量比>2 + 站上20日线 + 箱体振幅<15%；移动止损12%/止盈30%（全A股回测年化18.5%）",
         {"combine": "AND", "conditions": [
@@ -85,26 +89,6 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]
         ]},
         {"combine": "OR", "conditions": [],
          "stop_loss_pct": 0.0, "take_profit_pct": 0.30, "trailing_stop_pct": 0.12, "breakout_exit": False},
-    ),
-    "箱体突破·紧凑箱体": (
-        "突破前5日高点 + 量比>2 + 距20日低点较近（避免追高）；移动止损8%/止盈25%",
-        {"combine": "AND", "conditions": [
-            {"factor": "breakout_5", "op": ">", "value": 0.003},
-            {"factor": "vol_ratio", "op": ">", "value": 2.0},
-            {"factor": "near_low_20", "op": "<", "value": 0.25},
-        ]},
-        {"combine": "OR", "conditions": [],
-         "stop_loss_pct": 0.08, "take_profit_pct": 0.25, "trailing_stop_pct": 0.08, "breakout_exit": True},
-    ),
-    "超跌反弹·深V回收": (
-        "距20日低点很近 + 5日上涨比例>60% + 站上20日线；止损6%/止盈15%",
-        {"combine": "AND", "conditions": [
-            {"factor": "near_low_20", "op": "<", "value": 0.15},
-            {"factor": "up_days_5", "op": ">", "value": 0.6},
-            {"factor": "ma20_dev", "op": ">", "value": -0.02},
-        ]},
-        {"combine": "OR", "conditions": [],
-         "stop_loss_pct": 0.06, "take_profit_pct": 0.15, "trailing_stop_pct": 0.0, "breakout_exit": False},
     ),
     "超跌反弹·量比确认": (
         "超跌反弹 + 量比>1.2（放量确认，回撤更低至约13%）；止损6%/止盈15%",
@@ -127,6 +111,21 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]
         ]},
         {"combine": "OR", "conditions": [],
          "stop_loss_pct": 0.0, "take_profit_pct": 0.50, "trailing_stop_pct": 0.15, "breakout_exit": False},
+    ),
+    HOT_STRATEGY_NAME: (
+        "人气×涨停×题材×资金四维共振打分（横截面模型）：题材≥次主线且量比≥1.5才出手，接力需次日高开2%~6%，"
+        "仅情绪活跃期（涨停≥50家且连板高度≥3）参与，冰点空仓、每周≤3笔；-6%止损/3日时间止损/浮盈回撤保护（日线近似回测）",
+        {"engine": "hot_score", "threshold": 75, "sentiment_scope": "main", "conditions": [],
+         "description": "四维共振打分模型，引擎在 ashare_quant/hot_strategy.py"},
+        {"combine": "OR", "conditions": []},
+    ),
+    LIMIT_STRATEGY_NAME: (
+        "涨停回马枪·冲高回调低吸（形态模型）：收盘封死涨停(首板~2板，剔一字) → 次日冲高≥5%创20日新高 → "
+        "缩量回调5%~15%不破涨停日最低/MA20 → 缩量十字星+放量阳线收复5日线双确认 → 尾盘低吸；"
+        "前高减半+移动止盈+10日强平，大盘闸门（上证≥MA20/涨停≥50家/跌停≤10家/大跌熔断）；仅沪深主板",
+        {"engine": "limit_pullback_score", "threshold": 50, "conditions": [],
+         "description": "涨停回马枪形态引擎，代码在 ashare_quant/limit_pullback_strategy.py"},
+        {"combine": "OR", "conditions": []},
     ),
 }
 
@@ -536,6 +535,23 @@ def describe_exit(exit_config: dict[str, Any]) -> str:
     return " / ".join(parts) if parts else "无"
 
 
+def fetch_scan_quotes(data_service: Any, database: Any) -> dict[str, dict[str, float]]:
+    """刷新全市场实时快照并读取 {code: {price, volume}}，供盘中买点扫描覆盖最新价与当日成交量。"""
+    universe = data_service.eligible_universe(limit=int(data_service.settings.data["strategy_scan_symbols"]))
+    try:
+        data_service.refresh_quotes(universe["code"].tolist())
+    except Exception as error:
+        LOG.warning("盘中实时行情刷新失败：%s", error)
+    quotes: dict[str, dict[str, float]] = {}
+    for q in database.query_all("SELECT code, price, volume FROM market_quotes WHERE price>0"):
+        price = float(q["price"] or 0)
+        if price <= 0:
+            continue
+        volume = float(q["volume"] or 0)
+        quotes[str(q["code"])] = {"price": price, "volume": volume if volume > 0 else 0.0}
+    return quotes
+
+
 def find_buy_candidates(
     data_service: Any,
     database: Any,
@@ -553,7 +569,8 @@ def find_buy_candidates(
 
     每个策略结果为 {"strategy", "entry_desc", "exit_desc", "matches"}，
     matches 为 [{"code","name","price","factors"}, ...]。
-    current_quotes 为 {code: 实时价}，传入时用实时价覆盖最新 close 以便盘中扫描。
+    current_quotes 为 {code: 实时价} 或 {code: {"price": 实时价, "volume": 当日累计成交量}}，
+    传入时用实时价覆盖最新 close、当日成交量覆盖最新 volume，以便盘中扫描价格与量能条件都实时生效。
     min_average_amount / min_average_volume 按近 20 日均值过滤流动性。
     """
     strategies = database.query_all("SELECT name, entry_json, exit_json FROM signal_strategies WHERE enabled=1 ORDER BY created_at DESC")
@@ -572,11 +589,18 @@ def find_buy_candidates(
         frame = loaded.get(row.code)
         if frame is None or frame.empty or len(frame) < 20:
             continue
-        if current_quotes and row.code in current_quotes:
-            price = current_quotes[row.code]
+        quote = current_quotes.get(row.code) if current_quotes else None
+        if quote:
+            if isinstance(quote, dict):
+                price = float(quote.get("price") or 0)
+                intraday_volume = float(quote.get("volume") or 0)
+            else:
+                price, intraday_volume = float(quote), 0.0
             if price > 0:
                 frame = frame.copy()
                 frame.iloc[-1, frame.columns.get_loc("close")] = price
+                if intraday_volume > 0:
+                    frame.iloc[-1, frame.columns.get_loc("volume")] = intraday_volume
         # 价格与流动性过滤（只做一次，供所有策略复用）
         effective_price = float(frame["close"].iloc[-1])
         if max_price is not None and effective_price > max_price:
@@ -937,14 +961,14 @@ def filter_candidates_by_quality(
 
 
 def fetch_stock_metrics() -> dict[str, dict[str, float]]:
-    """获取全 A 股的换手率/动态市盈率/总市值（东方财富）。失败返回空 dict。"""
+    """获取全 A 股的换手率/动态市盈率/总市值（东方财富）。失败回退 Tushare daily_basic，再失败返回空 dict。"""
     import akshare as ak
 
     try:
         frame = ak.stock_zh_a_spot_em()
     except Exception as error:
-        LOG.warning("股票指标获取失败：%s", error)
-        return {}
+        LOG.warning("股票指标获取失败，尝试 Tushare 回退：%s", error)
+        return _stock_metrics_from_tushare()
 
     def num(value: Any) -> float:
         try:
@@ -962,6 +986,50 @@ def fetch_stock_metrics() -> dict[str, dict[str, float]]:
             "pe": num(row.get("市盈率-动态")),
             "market_cap": num(row.get("总市值")),
         }
+    if not metrics:
+        return _stock_metrics_from_tushare()
+    return metrics
+
+
+def _stock_metrics_from_tushare() -> dict[str, dict[str, float]]:
+    """Tushare daily_basic 全市场快照回退。日线指标为收盘后数据，取最近一个有数据的交易日。"""
+    from datetime import datetime, timedelta
+
+    from .data.providers import tushare_pro_from_env
+
+    pro = tushare_pro_from_env()
+    if pro is None:
+        return {}
+    frame = None
+    for days_back in range(0, 8):
+        trade_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+        try:
+            frame = pro.daily_basic(trade_date=trade_date, fields="ts_code,turnover_rate,pe_ttm,total_mv")
+        except Exception as error:
+            LOG.warning("Tushare daily_basic 获取失败 %s：%s", trade_date, error)
+            frame = None
+        if frame is not None and not frame.empty:
+            break
+    if frame is None or frame.empty:
+        return {}
+
+    def num(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    metrics: dict[str, dict[str, float]] = {}
+    for row in frame.to_dict("records"):
+        code = str(row.get("ts_code", ""))[:6]
+        if not code:
+            continue
+        metrics[code] = {
+            "turnover": num(row.get("turnover_rate")),
+            "pe": num(row.get("pe_ttm")),
+            "market_cap": num(row.get("total_mv")) * 1e4,  # Tushare 总市值单位为万元
+        }
+    LOG.info("Tushare daily_basic 回退提供 %s 只标的的质量指标", len(metrics))
     return metrics
 
 

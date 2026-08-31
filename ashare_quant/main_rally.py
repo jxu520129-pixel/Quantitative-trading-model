@@ -98,18 +98,38 @@ def event_industry_score(database: Database, industry: str) -> tuple[float, floa
 
 
 def fetch_earnings(code: str) -> tuple[float, float]:
-    """获取个股财务摘要，返回 (营收同比%, 净利同比%)。"""
+    """获取个股财务摘要，返回 (营收同比%, 净利同比%)。AkShare 失败时回退 Tushare 财务指标。"""
     import akshare as ak
 
+    frame = None
     try:
         frame = ak.stock_financial_abstract_ths(symbol=code)
     except Exception as error:
         LOG.warning("个股财务摘要获取失败 %s：%s", code, error)
+    if frame is not None and not frame.empty:
+        latest = frame.iloc[-1]  # 数据按报告期升序，最后一行为最新一期
+        return _num(latest.get("营业总收入同比增长率")), _num(latest.get("净利润同比增长率"))
+    return _earnings_from_tushare(code)
+
+
+def _earnings_from_tushare(code: str) -> tuple[float, float]:
+    """Tushare fina_indicator 回退（第三方代理套餐含官方 2000 积分级财务指标）。"""
+    from .data.providers import tushare_pro_from_env
+
+    pro = tushare_pro_from_env()
+    if pro is None:
         return 0.0, 0.0
-    if frame.empty:
+    suffix = ".SH" if code.startswith(("5", "6", "9")) else ".SZ"
+    try:
+        frame = pro.fina_indicator(ts_code=f"{code}{suffix}", fields="ts_code,end_date,or_yoy,netprofit_yoy")
+    except Exception as error:
+        LOG.warning("Tushare 财务指标获取失败 %s：%s", code, error)
         return 0.0, 0.0
-    latest = frame.iloc[-1]  # 数据按报告期升序，最后一行为最新一期
-    return _num(latest.get("营业总收入同比增长率")), _num(latest.get("净利润同比增长率"))
+    if frame is None or frame.empty:
+        return 0.0, 0.0
+    frame = frame.sort_values("end_date", ascending=False)
+    latest = frame.iloc[0]
+    return _num(latest.get("or_yoy")), _num(latest.get("netprofit_yoy"))
 
 
 def earnings_score(revenue_yoy: float, profit_yoy: float) -> float:

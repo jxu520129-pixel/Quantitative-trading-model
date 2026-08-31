@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -56,6 +57,48 @@ class MarketDataProvider(ABC):
 def _with_exchange_prefix(code: str) -> str:
     code = str(code).zfill(6)
     return ("sh" if code.startswith(("5", "6", "9")) else "sz") + code
+
+
+def tushare_pro_from_env() -> Any | None:
+    """按 .env 构建 Tushare pro API（TUSHARE_API_URL 可指向第三方代理），未配置 token 返回 None。
+
+    供不经过 DataService 的模块（主升浪财务、因子实验室指标）做数据回退使用。
+    """
+    token = os.getenv("TUSHARE_TOKEN", "")
+    if not token:
+        return None
+    return TushareProvider(token, os.getenv("TUSHARE_API_URL", ""))._pro()
+
+
+def sina_spot_prices(codes: list[str], timeout: float = 5.0) -> dict[str, float]:
+    """新浪实时报价（按需轻量拉取，只请求给定代码，适合看板高频轮询展示）。
+
+    返回 {code: 最新价}；价格无效或停牌为 0 的代码不会出现在结果里，
+    调用方应回退到数据库 latest_price。失败时直接抛异常由调用方兜底。
+    """
+    import requests
+
+    symbols = ",".join(_with_exchange_prefix(code) for code in codes)
+    response = requests.get(
+        f"https://hq.sinajs.cn/list={symbols}",
+        headers={"Referer": "https://finance.sina.com.cn"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    response.encoding = "gbk"
+    result: dict[str, float] = {}
+    for code, line in zip(codes, response.text.splitlines()):
+        parts = line.split('"')
+        if len(parts) < 2:
+            continue
+        fields = parts[1].split(",")
+        try:
+            price = float(fields[3])
+        except (IndexError, ValueError):
+            continue
+        if price > 0:
+            result[str(code).zfill(6)] = price
+    return result
 
 
 class AkShareProvider(MarketDataProvider):
@@ -136,17 +179,23 @@ class TushareProvider(MarketDataProvider):
 
     name = "tushare"
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, api_url: str = ""):
         if not token:
             raise ValueError("启用 Tushare 备用数据源需要配置 TUSHARE_TOKEN")
         self.token = token
+        self.api_url = api_url
 
     def _pro(self) -> Any:
         try:
             import tushare as ts
         except ImportError as error:
             raise RuntimeError("未安装 Tushare") from error
-        return ts.pro_api(self.token)
+        pro = ts.pro_api(self.token)
+        if self.api_url:
+            # 第三方代理（如付费转发服务）通过覆盖请求地址接入；服务到期会在这里报错，
+            # 由上层回退 AkShare 主源兜底，清空 TUSHARE_API_URL 即恢复官方接口。
+            pro._DataApi__http_url = self.api_url
+        return pro
 
     @with_retry()
     def list_securities(self) -> pd.DataFrame:

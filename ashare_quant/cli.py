@@ -11,7 +11,9 @@ from typing import Any
 
 from .data.seed import seed_demo_market
 from .fundamental import update_fundamentals
-from .lab import build_buy_report
+from .hot_strategy import run_hot_backtest
+from .lab import build_buy_report, fetch_scan_quotes
+from .limit_pullback_strategy import run_limit_pullback_backtest
 from .main_rally import generate_main_rally_report, score_main_rally_candidates
 from .scheduler import after_close, end_of_day, run_scheduler
 from .presentation import localize_payload
@@ -96,6 +98,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("score-main-rally", help="主升浪评分：事件+宏观+产业链+盈利+技术加权")
     sub.add_parser("find-buys", help="扫描策略买入候选并通过邮件/企业微信发送")
     sub.add_parser("retrain-model", help="重训主升概率模型（收盘后管线，可手动触发）")
+    hot = sub.add_parser("hot-backtest", help="短线人气·热度共振策略日线近似回测（落库供看板展示）")
+    hot.add_argument("--start", default="2025-01-01", help="回测起始日")
+    hot.add_argument("--end", default=None, help="回测结束日，默认今天")
+    hot.add_argument("--threshold", type=float, default=75.0, help="强候选评分阈值（小资金档 75）")
+    hot.add_argument("--top-n", type=int, default=10, help="每日清单保留只数")
+    hot.add_argument("--max-positions", type=int, default=1, help="同时持仓上限（小资金档 1）")
+    hot.add_argument("--initial-cash", type=float, default=10000.0, help="初始资金（小资金档默认 1 万）")
+    hot.add_argument("--sentiment-scope", choices=["hs", "main"], default="hs", help="情绪统计口径：hs=沪深两市（文档口径），main=仅主板（更严）")
+    pullback = sub.add_parser("pullback-backtest", help="涨停回马枪·冲高回调低吸策略日线近似回测（落库供看板展示）")
+    pullback.add_argument("--start", default="2020-01-01", help="回测起始日")
+    pullback.add_argument("--end", default=None, help="回测结束日，默认今天")
+    pullback.add_argument("--threshold", type=float, default=50.0, help="同日多信号打分下限（低于不买）")
+    pullback.add_argument("--top-n", type=int, default=3, help="同日最多买入只数")
+    pullback.add_argument("--max-positions", type=int, default=3, help="同时持仓上限（文档 §9：3 只）")
+    pullback.add_argument("--initial-cash", type=float, default=1_000_000.0, help="初始资金")
     return parser
 
 
@@ -168,13 +185,46 @@ def main() -> None:
     elif args.command == "score-main-rally":
         print_json(score_main_rally_candidates(runtime))
     elif args.command == "find-buys":
-        has_candidates, report, html = build_buy_report(runtime.data, runtime.database)
+        quotes = fetch_scan_quotes(runtime.data, runtime.database)
+        has_candidates, report, html = build_buy_report(runtime.data, runtime.database, current_quotes=quotes)
         if has_candidates:
             runtime.notifications.send("买点扫描", report, "INFO", html=html)
         print(report)
     elif args.command == "retrain-model":
         from . import ml_model
         print_json(ml_model.retrain(runtime.database, runtime.data, runtime.settings))
+    elif args.command == "hot-backtest":
+        metrics = run_hot_backtest(
+            runtime.database, runtime.data, start_date=args.start, end_date=args.end,
+            threshold=args.threshold, top_n=args.top_n, max_positions=args.max_positions,
+            initial_cash=args.initial_cash, sentiment_scope=args.sentiment_scope,
+        )
+        trades = metrics.pop("trades")
+        equity = metrics.pop("equity")
+        print_json(metrics)
+        if trades:
+            print("\n最近 10 笔交易：")
+            for t in trades[-10:]:
+                print(
+                    f"{t['entry_date']} {t['code']} {t['name']} [{t['mode']}] 评分{t['score']:.0f}"
+                    f"  {t['entry_price']} → {t['exit_date']} {t['exit_price']}  {t['pnl_pct']:+.2%}（{t['reason']}）"
+                )
+    elif args.command == "pullback-backtest":
+        metrics = run_limit_pullback_backtest(
+            runtime.database, runtime.data, start_date=args.start, end_date=args.end,
+            threshold=args.threshold, top_n=args.top_n, max_positions=args.max_positions,
+            initial_cash=args.initial_cash,
+        )
+        trades = metrics.pop("trades")
+        metrics.pop("equity", None)
+        print_json(metrics)
+        if trades:
+            print("\n最近 10 笔交易：")
+            for t in trades[-10:]:
+                print(
+                    f"{t['entry_date']} {t['code']} {t['name']} 评分{t['score']:.0f}"
+                    f"  {t['entry_price']} → {t['exit_date']} {t['exit_price']}  {t['pnl_pct']:+.2%}（{t['reason']}）"
+                )
 
 
 if __name__ == "__main__":

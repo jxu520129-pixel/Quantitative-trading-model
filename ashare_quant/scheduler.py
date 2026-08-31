@@ -10,7 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from . import ml_model
 from .fundamental import update_fundamentals
-from .lab import build_buy_report
+from .lab import build_buy_report, fetch_scan_quotes
 from .main_rally import generate_main_rally_report
 from .services.runtime import Runtime, build_runtime
 from .utils import today_text
@@ -81,18 +81,10 @@ def retrain_model(runtime: Runtime) -> None:
 
 
 def intraday_buy_scan(runtime: Runtime) -> None:
-    """盘中买点扫描：用实时价覆盖最新 close，只在有候选时发送邮件。"""
+    """盘中买点扫描：用实时价与当日成交量覆盖最新 bar，只在有候选时发送邮件。"""
     if _skip_if_holiday(runtime, "盘中买点扫描"):
         return
-    universe = runtime.data.eligible_universe(limit=int(runtime.settings.data["strategy_scan_symbols"]))
-    try:
-        runtime.data.refresh_quotes(universe["code"].tolist())
-    except Exception as error:
-        LOG.warning("盘中实时行情刷新失败：%s", error)
-    quotes = {
-        str(q["code"]): float(q["price"])
-        for q in runtime.database.query_all("SELECT code, price FROM market_quotes WHERE price>0")
-    }
+    quotes = fetch_scan_quotes(runtime.data, runtime.database)
     has_candidates, report, html = build_buy_report(runtime.data, runtime.database, current_quotes=quotes, exclude_prefix="主升浪")
     if not has_candidates:
         return
@@ -133,7 +125,7 @@ def run_scheduler(config_path: str | None = None) -> None:
     scheduler.add_job(after_close, CronTrigger(day_of_week="mon-sun", hour=signal_h, minute=signal_m, timezone=timezone), args=[runtime], id="after_close")
     scheduler.add_job(end_of_day, CronTrigger(day_of_week="mon-sun", hour=eod_h, minute=eod_m, timezone=timezone), args=[runtime], id="end_of_day")
     scheduler.add_job(retrain_model, CronTrigger(day_of_week="mon-sun", hour=retrain_h, minute=retrain_m, timezone=timezone), args=[runtime], id="retrain_model")
-    for hour, minute in ((9, 39), (10, 30), (13, 30), (14, 30), (14, 50), (15, 30)):
+    for hour, minute in ((9, 37), (10, 00), (10, 30), (14, 30), (14, 50), (15, 30)):
         scheduler.add_job(
             intraday_buy_scan,
             CronTrigger(day_of_week="mon-sun", hour=hour, minute=minute, timezone=timezone),
