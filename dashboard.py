@@ -30,12 +30,26 @@ st.markdown(
       [data-testid="stSidebar"] { background: #0e1114; border-right: 1px solid #23292e; }
       [data-testid="stMetric"] { background: #12161a; border: 1px solid #252c31; padding: 14px; border-radius: 6px; }
       [data-testid="stMetricValue"] { font-size: 1.45rem; line-height: 1.25; }
-      .block-container { padding-top: 1.4rem; max-width: 1500px; }
+      .block-container { padding-top: 0.9rem; max-width: 1500px; }
       h1 { font-size: 1.85rem !important; letter-spacing: 0 !important; }
       h2, h3 { letter-spacing: 0 !important; }
       div.stButton > button { border-radius: 5px; border-color: #30383e; min-height: 40px; }
       [data-testid="stDataFrame"] { border: 1px solid #252c31; }
       [data-testid="stToolbar"], [data-testid="stElementToolbar"] { display: none !important; }
+      /* tab 紧凑：减少空白、拉近 tab 与内容 */
+      [data-baseweb="tab-list"] { margin-bottom: 0 !important; gap: 0 !important; }
+      [data-testid="stTabs"] { margin-bottom: 0 !important; }
+      [data-testid="stTabContent"] { padding-top: 0.6rem !important; }
+      button[data-baseweb="tab"] { padding-top: 0.4rem !important; padding-bottom: 0.4rem !important; }
+      /* 二级 tab 视觉区分：字号小、颜色稍暗，与一级 tab 形成层次 */
+      div [data-testid="stTabs"] div [data-testid="stTabs"] button[data-baseweb="tab"] {
+        font-size: 0.84rem !important; color: #8a99a6 !important;
+      }
+      div [data-testid="stTabs"] div [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+        color: #36c98f !important;
+      }
+      /* 副标题/说明文字间距收紧 */
+      .stMarkdown p { margin-bottom: 0.35rem; }
     </style>
     """,
     unsafe_allow_html=True,
