@@ -26,64 +26,57 @@ st.set_page_config(page_title="A 股量化交易控制台", page_icon="Q", layou
 st.markdown(
     """
     <style>
-      /* 设计令牌：深色金融看板（OLED 风），涨红跌绿 */
+      /* 设计令牌：现代极简深色（GitHub Dark 参考），涨红跌绿 */
       :root {
-        --bg: #0a0e14; --surface: #12161d; --surface-2: #171c24;
-        --border: #1f2830; --border-strong: #2b3641;
-        --text: #e6edf3; --dim: #8a99a6; --faint: #5c6b78;
-        --brand: #36c98f; --up: #ff6b6b; --warn: #e7b85c;
+        --bg: #0d1117; --surface: #161b22; --border: #21262d; --border-strong: #30363d;
+        --text: #e6edf3; --dim: #8b949e; --faint: #6e7681;
+        --accent: #58a6ff; --accent-strong: #1f6feb;
+        --up: #ff6b6b; --down: #36c98f; --warn: #d29922;
       }
-      /* 整体背景：深色 + 顶部微光 */
-      [data-testid="stAppViewContainer"] {
-        background: radial-gradient(1200px 520px at 18% -8%, #101824 0%, #0a0e14 58%);
-        color: #e6edf3;
-      }
-      [data-testid="stSidebar"] { background: #0d1117; border-right: 1px solid #1f2830; }
-      .block-container { padding-top: 0.9rem; max-width: 1500px; }
+      /* 基础：深灰蓝底，非纯黑；系统中文优先 */
+      [data-testid="stAppViewContainer"] { background: #0d1117; color: #e6edf3; }
+      [data-testid="stSidebar"] { background: #0d1117; border-right: 1px solid #21262d; }
+      html, body, [class*="css"] { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; }
+      .block-container { padding-top: 1.1rem; max-width: 1500px; }
       /* 标题与说明 */
-      h1 { font-size: 1.6rem !important; font-weight: 700 !important; letter-spacing: -0.01em !important; color: #f2f6fa !important; }
-      h2, h3 { letter-spacing: 0 !important; }
-      [data-testid="stCaptionContainer"] p, [data-testid="stCaptionContainer"] { color: #8a99a6 !important; }
-      /* 指标卡片 */
-      [data-testid="stMetric"] {
-        background: linear-gradient(180deg, #141a22 0%, #11161d 100%);
-        border: 1px solid #1f2830; padding: 14px 16px; border-radius: 8px;
-      }
-      [data-testid="stMetricLabel"] { color: #8a99a6 !important; font-size: 0.82rem; }
-      [data-testid="stMetricValue"] { font-size: 1.5rem; line-height: 1.2; font-variant-numeric: tabular-nums; color: #f2f6fa; }
-      /* 数字等宽（金额/比例对齐更整齐） */
-      [data-testid="stDataFrame"] { font-variant-numeric: tabular-nums; }
-      /* 一级 tab：选中态加粗白字 + 绿色下划线 */
-      [data-baseweb="tab-list"] { margin-bottom: 0.2rem !important; gap: 0.2rem; border-bottom: 1px solid #1f2830; }
-      button[data-baseweb="tab"] { padding: 0.45rem 0.9rem !important; color: #8a99a6 !important; }
+      h1 { font-size: 1.5rem !important; font-weight: 650 !important; letter-spacing: -0.01em !important; color: #f0f6fc !important; }
+      h2, h3 { letter-spacing: 0 !important; font-weight: 600 !important; }
+      [data-testid="stCaptionContainer"] p, [data-testid="stCaptionContainer"] { color: #8b949e !important; }
+      /* 指标卡：极简浅色块，无边框 */
+      [data-testid="stMetric"] { background: #161b22; border: none; padding: 16px 18px; border-radius: 8px; }
+      [data-testid="stMetricLabel"] { color: #8b949e !important; font-size: 0.82rem; }
+      [data-testid="stMetricValue"] { font-size: 1.55rem; line-height: 1.15; font-variant-numeric: tabular-nums; color: #f0f6fc; }
+      /* 表格：细边框 + 等宽数字 */
+      [data-testid="stDataFrame"] { border: 1px solid #21262d; border-radius: 8px; font-variant-numeric: tabular-nums; }
+      /* 一级 tab：细下划线，选中加粗白字 + 品牌蓝线 */
+      [data-baseweb="tab-list"] { margin-bottom: 0.4rem !important; gap: 0.4rem; border-bottom: 1px solid #21262d; }
+      button[data-baseweb="tab"] { padding: 0.45rem 1rem !important; color: #8b949e !important; }
       button[data-baseweb="tab"] > div[data-testid="stMarkdownContainer"] p { font-size: 0.92rem !important; }
-      button[data-baseweb="tab"][aria-selected="true"] { color: #e6edf3 !important; font-weight: 600 !important; }
-      [data-baseweb="tab-highlight"] { background-color: #36c98f !important; height: 2px !important; }
-      /* 二级 tab：更小、更淡，与一级 tab 形成层次 */
+      button[data-baseweb="tab"][aria-selected="true"] { color: #f0f6fc !important; font-weight: 600 !important; }
+      [data-baseweb="tab-highlight"] { background-color: #58a6ff !important; height: 2px !important; }
+      /* 二级 tab：更小更淡 */
       div [data-testid="stTabs"] div [data-testid="stTabs"] button[data-baseweb="tab"] {
-        font-size: 0.82rem !important; color: #5c6b78 !important; padding: 0.3rem 0.7rem !important;
+        font-size: 0.82rem !important; color: #6e7681 !important; padding: 0.3rem 0.8rem !important;
       }
       div [data-testid="stTabs"] div [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
-        color: #36c98f !important;
+        color: #58a6ff !important;
       }
       div [data-testid="stTabs"] div [data-testid="stTabs"] [data-baseweb="tab-list"] { border-bottom: none !important; }
-      [data-testid="stTabContent"] { padding-top: 0.6rem !important; }
-      /* 按钮：默认描边，主按钮品牌绿填充 */
+      [data-testid="stTabContent"] { padding-top: 0.8rem !important; }
+      /* 按钮：次级描边，主按钮品牌蓝填充 */
       div.stButton > button {
-        border-radius: 6px; border: 1px solid #2b3641; background: #12161d; color: #e6edf3;
+        border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3;
         min-height: 40px; font-weight: 500;
       }
-      div.stButton > button:hover { border-color: #36c98f; color: #36c98f; }
-      div.stButton > button[kind="primary"] { background: #36c98f; color: #0a0e14; border-color: #36c98f; font-weight: 600; }
-      div.stButton > button[kind="primary"]:hover { background: #3fdba1; color: #0a0e14; }
+      div.stButton > button:hover { border-color: #58a6ff; color: #58a6ff; background: #161b22; }
+      div.stButton > button[kind="primary"] { background: #1f6feb; color: #ffffff; border-color: #1f6feb; font-weight: 600; }
+      div.stButton > button[kind="primary"]:hover { background: #388bfd; color: #ffffff; }
       /* 信息框 */
-      [data-testid="stAlert"] { border-radius: 6px; border-width: 1px; }
-      /* 数据表格 */
-      [data-testid="stDataFrame"] { border: 1px solid #1f2830; border-radius: 6px; }
+      [data-testid="stAlert"] { border-radius: 6px; }
       /* 隐藏默认工具栏 */
       [data-testid="stToolbar"], [data-testid="stElementToolbar"] { display: none !important; }
-      /* 段落间距收紧 */
-      .stMarkdown p { margin-bottom: 0.35rem; }
+      /* 段落间距 */
+      .stMarkdown p { margin-bottom: 0.4rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -126,7 +119,7 @@ def _equity_chart_with_marks(equity_curve: list, trades: list) -> None:
             buys.append({"日期": entry, "净值": equity_map[entry]})
         if exit_ in equity_map:
             sells.append({"日期": exit_, "净值": equity_map[exit_]})
-    line = alt.Chart(eq_df).mark_line(color="#36C98F", strokeWidth=1.6).encode(
+    line = alt.Chart(eq_df).mark_line(color="#58A6FF", strokeWidth=1.6).encode(
         x=alt.X("日期:T", title=None), y=alt.Y("资产净值:Q", title=None, scale=alt.Scale(zero=False))
     )
     chart = line
@@ -182,7 +175,7 @@ def authorized() -> bool:
 
 st.title("A 股量化交易控制台")
 _mode_label = "模拟盘" if app.settings.mode == "PAPER" else "实盘"
-_mode_color = "#36c98f" if app.settings.mode == "PAPER" else "#e7b85c"
+_mode_color = "#58a6ff" if app.settings.mode == "PAPER" else "#d29922"
 st.markdown(
     f"<span style='color:#8a99a6;font-size:0.9rem'>运行模式 "
     f"<b style='color:{_mode_color}'>{_mode_label}</b>"
@@ -578,9 +571,9 @@ with overview:
             "净值日期": plot_display["净值日期"],
             "累计收益率": (plot_eq["total_equity"] / initial_cash - 1) * 100,
         })
-        st.line_chart(returns_frame, x="净值日期", y="累计收益率", color="#36C98F")
+        st.line_chart(returns_frame, x="净值日期", y="累计收益率", color="#58A6FF")
         st.subheader("资产构成")
-        st.line_chart(plot_display, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#36C98F", "#8A99A6", "#E7B85C"])
+        st.line_chart(plot_display, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#58A6FF", "#8B949E", "#D29922"])
 with holdings:
     refresh_seconds = st.selectbox(
         "浮动盈亏实时刷新间隔（秒，0=暂停刷新）",
@@ -693,7 +686,7 @@ with backtest_tab:
         cols[3].metric("夏普", "-" if run["sharpe"] is None else f"{run['sharpe']:.2f}")
         cols[4].metric("胜率", f"{run['win_rate']:.2%}")
         curve = localize_dataframe(frame("SELECT trade_date,equity FROM backtest_equity WHERE run_id=? ORDER BY trade_date", (run["id"],)))
-        st.line_chart(curve, x="交易日期", y="资产净值", color="#36C98F")
+        st.line_chart(curve, x="交易日期", y="资产净值", color="#58A6FF")
 with settings_tab:
     if is_admin:
         r1, r2 = st.columns(2)
