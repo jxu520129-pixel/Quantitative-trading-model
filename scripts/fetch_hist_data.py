@@ -53,18 +53,22 @@ def _load_env() -> tuple[str, str]:
 
 def _call(api_name: str, token: str, url: str, params: dict, fields: str, timeout: int = 60):
     payload = {"api_name": api_name, "token": token, "params": params, "fields": fields}
-    for attempt in range(1, 4):
+    for attempt in range(1, 6):
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
         except Exception as error:  # noqa: BLE001
-            if attempt == 3:
+            if attempt == 5:
                 raise
             time.sleep(1.5 * attempt)
             continue
         if data.get("code") != 0:
-            raise RuntimeError(f"{api_name} 返回错误：{data.get('msg')} params={params}")
+            # 限流/业务错误也退避重试（如「请求速度过快」），最终失败才抛出
+            if attempt == 5:
+                raise RuntimeError(f"{api_name} 返回错误：{data.get('msg')} params={params}")
+            time.sleep(2.0 * attempt)
+            continue
         d = data["data"]
         return d["fields"], d["items"]
     raise RuntimeError("unreachable")
