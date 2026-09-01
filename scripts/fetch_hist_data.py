@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 import time
@@ -30,7 +31,11 @@ _BJ_PREFIXES = ("43", "83", "87", "88", "920")
 
 
 def _load_env() -> tuple[str, str]:
-    token, url = "", ""
+    # 优先读环境变量（docker-compose 用 env_file 注入，容器内无 .env 文件），fallback 读 .env 文件
+    token = os.environ.get("TUSHARE_TOKEN", "")
+    url = os.environ.get("TUSHARE_API_URL", "")
+    if token and url:
+        return token, url
     env_path = ROOT / ".env"
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
