@@ -26,29 +26,63 @@ st.set_page_config(page_title="A 股量化交易控制台", page_icon="Q", layou
 st.markdown(
     """
     <style>
-      [data-testid="stAppViewContainer"] { background: #090b0d; }
-      [data-testid="stSidebar"] { background: #0e1114; border-right: 1px solid #23292e; }
-      [data-testid="stMetric"] { background: #12161a; border: 1px solid #252c31; padding: 14px; border-radius: 6px; }
-      [data-testid="stMetricValue"] { font-size: 1.45rem; line-height: 1.25; }
+      /* 设计令牌：深色金融看板（OLED 风），涨红跌绿 */
+      :root {
+        --bg: #0a0e14; --surface: #12161d; --surface-2: #171c24;
+        --border: #1f2830; --border-strong: #2b3641;
+        --text: #e6edf3; --dim: #8a99a6; --faint: #5c6b78;
+        --brand: #36c98f; --up: #ff6b6b; --warn: #e7b85c;
+      }
+      /* 整体背景：深色 + 顶部微光 */
+      [data-testid="stAppViewContainer"] {
+        background: radial-gradient(1200px 520px at 18% -8%, #101824 0%, #0a0e14 58%);
+        color: #e6edf3;
+      }
+      [data-testid="stSidebar"] { background: #0d1117; border-right: 1px solid #1f2830; }
       .block-container { padding-top: 0.9rem; max-width: 1500px; }
-      h1 { font-size: 1.85rem !important; letter-spacing: 0 !important; }
+      /* 标题与说明 */
+      h1 { font-size: 1.6rem !important; font-weight: 700 !important; letter-spacing: -0.01em !important; color: #f2f6fa !important; }
       h2, h3 { letter-spacing: 0 !important; }
-      div.stButton > button { border-radius: 5px; border-color: #30383e; min-height: 40px; }
-      [data-testid="stDataFrame"] { border: 1px solid #252c31; }
-      [data-testid="stToolbar"], [data-testid="stElementToolbar"] { display: none !important; }
-      /* tab 紧凑：减少空白、拉近 tab 与内容 */
-      [data-baseweb="tab-list"] { margin-bottom: 0 !important; gap: 0 !important; }
-      [data-testid="stTabs"] { margin-bottom: 0 !important; }
-      [data-testid="stTabContent"] { padding-top: 0.6rem !important; }
-      button[data-baseweb="tab"] { padding-top: 0.4rem !important; padding-bottom: 0.4rem !important; }
-      /* 二级 tab 视觉区分：字号小、颜色稍暗，与一级 tab 形成层次 */
+      [data-testid="stCaptionContainer"] p, [data-testid="stCaptionContainer"] { color: #8a99a6 !important; }
+      /* 指标卡片 */
+      [data-testid="stMetric"] {
+        background: linear-gradient(180deg, #141a22 0%, #11161d 100%);
+        border: 1px solid #1f2830; padding: 14px 16px; border-radius: 8px;
+      }
+      [data-testid="stMetricLabel"] { color: #8a99a6 !important; font-size: 0.82rem; }
+      [data-testid="stMetricValue"] { font-size: 1.5rem; line-height: 1.2; font-variant-numeric: tabular-nums; color: #f2f6fa; }
+      /* 数字等宽（金额/比例对齐更整齐） */
+      [data-testid="stDataFrame"] { font-variant-numeric: tabular-nums; }
+      /* 一级 tab：选中态加粗白字 + 绿色下划线 */
+      [data-baseweb="tab-list"] { margin-bottom: 0.2rem !important; gap: 0.2rem; border-bottom: 1px solid #1f2830; }
+      button[data-baseweb="tab"] { padding: 0.45rem 0.9rem !important; color: #8a99a6 !important; }
+      button[data-baseweb="tab"] > div[data-testid="stMarkdownContainer"] p { font-size: 0.92rem !important; }
+      button[data-baseweb="tab"][aria-selected="true"] { color: #e6edf3 !important; font-weight: 600 !important; }
+      [data-baseweb="tab-highlight"] { background-color: #36c98f !important; height: 2px !important; }
+      /* 二级 tab：更小、更淡，与一级 tab 形成层次 */
       div [data-testid="stTabs"] div [data-testid="stTabs"] button[data-baseweb="tab"] {
-        font-size: 0.84rem !important; color: #8a99a6 !important;
+        font-size: 0.82rem !important; color: #5c6b78 !important; padding: 0.3rem 0.7rem !important;
       }
       div [data-testid="stTabs"] div [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
         color: #36c98f !important;
       }
-      /* 副标题/说明文字间距收紧 */
+      div [data-testid="stTabs"] div [data-testid="stTabs"] [data-baseweb="tab-list"] { border-bottom: none !important; }
+      [data-testid="stTabContent"] { padding-top: 0.6rem !important; }
+      /* 按钮：默认描边，主按钮品牌绿填充 */
+      div.stButton > button {
+        border-radius: 6px; border: 1px solid #2b3641; background: #12161d; color: #e6edf3;
+        min-height: 40px; font-weight: 500;
+      }
+      div.stButton > button:hover { border-color: #36c98f; color: #36c98f; }
+      div.stButton > button[kind="primary"] { background: #36c98f; color: #0a0e14; border-color: #36c98f; font-weight: 600; }
+      div.stButton > button[kind="primary"]:hover { background: #3fdba1; color: #0a0e14; }
+      /* 信息框 */
+      [data-testid="stAlert"] { border-radius: 6px; border-width: 1px; }
+      /* 数据表格 */
+      [data-testid="stDataFrame"] { border: 1px solid #1f2830; border-radius: 6px; }
+      /* 隐藏默认工具栏 */
+      [data-testid="stToolbar"], [data-testid="stElementToolbar"] { display: none !important; }
+      /* 段落间距收紧 */
       .stMarkdown p { margin-bottom: 0.35rem; }
     </style>
     """,
@@ -147,7 +181,14 @@ def authorized() -> bool:
 
 
 st.title("A 股量化交易控制台")
-st.caption(f"模拟盘 · 东方财富模拟账户 · 数据库：{app.settings.db_path.name}")
+_mode_label = "模拟盘" if app.settings.mode == "PAPER" else "实盘"
+_mode_color = "#36c98f" if app.settings.mode == "PAPER" else "#e7b85c"
+st.markdown(
+    f"<span style='color:#8a99a6;font-size:0.9rem'>运行模式 "
+    f"<b style='color:{_mode_color}'>{_mode_label}</b>"
+    f"　·　数据库 <b style='color:#e6edf3'>{app.settings.db_path.name}</b></span>",
+    unsafe_allow_html=True,
+)
 
 if not app.settings.dashboard_password:
     is_admin = False
