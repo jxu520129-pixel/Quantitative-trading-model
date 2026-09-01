@@ -182,249 +182,248 @@ lab_tab, overview, holdings, orders, signals_tab, risk_tab, backtest_tab, settin
     ["因子实验室", "账户", "持仓", "委托成交", "交易信号", "风险监控", "回测", "配置"]
 )
 with lab_tab:
-    st.markdown("因子公式基于日线 OHLCV 列 `open/high/low/close/volume/amount/pre_close`，可用 `shift/rolling/pct_change/ewm/diff/clip` 等 pandas 方法。")
-
-    # ① 因子管理
-    st.subheader("① 因子管理")
-    with st.form("create_factor", clear_on_submit=True):
-        c1, c2 = st.columns([1, 3])
-        new_factor_name = c1.text_input("因子名（英文/数字/下划线）")
-        new_factor_expr = c2.text_input("公式表达式", placeholder="如 close/close.shift(5)-1")
-        create_factor_clicked = st.form_submit_button("创建因子", disabled=not is_admin)
-    if create_factor_clicked:
-        if not new_factor_name or not new_factor_expr:
-            st.error("请填写因子名与公式表达式")
-        else:
-            try:
-                evaluate_factor(new_factor_expr, _lab_sample_frame())
-                app.database.execute(
-                    "INSERT INTO custom_factors(id,name,expression,created_at) VALUES(?,?,?,?)",
-                    (uuid4().hex, new_factor_name, new_factor_expr, utc_now_text()),
-                )
-                st.success(f"因子 `{new_factor_name}` 已创建")
-            except ValueError as error:
-                st.error(str(error))
-
-    custom_factors = app.database.query_all("SELECT * FROM custom_factors ORDER BY created_at DESC")
-    if custom_factors:
-        st.markdown("**自定义因子**")
-        st.dataframe(pd.DataFrame([{"因子名": f["name"], "公式": f["expression"]} for f in custom_factors]), width="stretch", hide_index=True)
-        del_col, del_btn = st.columns([2, 1])
-        del_name = del_col.selectbox("删除因子", [f["name"] for f in custom_factors], key="lab_del_factor")
-        if del_btn.button("删除该因子", disabled=not is_admin):
-            app.database.execute("DELETE FROM custom_factors WHERE name=?", (del_name,))
-            st.rerun()
-
-    st.markdown("**内置因子库（可一键导入）**")
-    st.dataframe(pd.DataFrame([{"因子名": k, "说明": v[0], "公式": v[1]} for k, v in BUILTIN_FACTOR_FORMULAS.items()]), width="stretch", hide_index=True)
-    imp_col, imp_btn = st.columns([2, 1])
-    import_name = imp_col.selectbox("选择内置因子", list(BUILTIN_FACTOR_FORMULAS), key="lab_import_factor")
-    if imp_btn.button("导入为自定义因子", disabled=not is_admin):
-        expr = BUILTIN_FACTOR_FORMULAS[import_name][1]
-        app.database.execute(
-            "INSERT OR IGNORE INTO custom_factors(id,name,expression,created_at) VALUES(?,?,?,?)",
-            (uuid4().hex, import_name, expr, utc_now_text()),
-        )
-        st.success(f"已导入因子 `{import_name}`")
-
-    st.divider()
-
-    # ② 策略定义
-    st.subheader("② 策略定义（买入 / 离场条件）")
-    st.markdown("**内置策略模板（可一键导入）**")
-    st.dataframe(
-        pd.DataFrame([{"策略": name, "说明": desc} for name, (desc, _e, _x) in BUILTIN_STRATEGY_TEMPLATES.items()]),
-        width="stretch", hide_index=True,
+    lab_bt, lab_scan, lab_factor, lab_strategy = st.tabs(
+        ["回测与记录", "盘中买点扫描", "因子管理", "策略定义"]
     )
-    tmpl_col, tmpl_btn = st.columns([2, 1])
-    tmpl_name = tmpl_col.selectbox("选择策略模板", list(BUILTIN_STRATEGY_TEMPLATES), key="lab_import_strategy")
-    if tmpl_btn.button("导入该策略", disabled=not is_admin):
-        _desc, entry_cfg, exit_cfg = BUILTIN_STRATEGY_TEMPLATES[tmpl_name]
-        app.database.execute(
-            """INSERT INTO signal_strategies(id,name,entry_json,exit_json,created_at) VALUES(?,?,?,?,?)
-               ON CONFLICT(name) DO UPDATE SET entry_json=excluded.entry_json, exit_json=excluded.exit_json, created_at=excluded.created_at""",
-            (uuid4().hex, tmpl_name, json.dumps(entry_cfg, ensure_ascii=False), json.dumps(exit_cfg, ensure_ascii=False), utc_now_text()),
-        )
-        st.success(f"策略 `{tmpl_name}` 已导入，可在下方「回测」或「④ 盘中买点扫描」使用")
-    st.divider()
-    all_factor_names = [f["name"] for f in app.database.query_all("SELECT name FROM custom_factors")] + list(BUILTIN_FACTOR_FORMULAS)
-    all_factor_names = list(dict.fromkeys(all_factor_names))
-    cond_column_config = {
-        "factor": st.column_config.SelectboxColumn("因子", options=all_factor_names, required=True),
-        "op": st.column_config.SelectboxColumn("运算符", options=[">", "<", ">=", "<=", "==", "!="], required=True),
-        "value": st.column_config.NumberColumn("阈值", required=True),
-    }
-    empty_conds = pd.DataFrame(columns=["factor", "op", "value"])
-    strategy_name = st.text_input("策略名称", key="lab_strategy_name")
-    st.markdown("**买入条件**（满足方式）")
-    entry_combine = st.radio("买入满足方式", ["AND", "OR"], horizontal=True, key="lab_entry_combine")
-    entry_df = st.data_editor(empty_conds, num_rows="dynamic", key="lab_entry_editor", column_config=cond_column_config, width="stretch")
-    st.markdown("**离场条件**（满足方式）")
-    exit_combine = st.radio("离场满足方式", ["AND", "OR"], horizontal=True, key="lab_exit_combine")
-    exit_df = st.data_editor(empty_conds, num_rows="dynamic", key="lab_exit_editor", column_config=cond_column_config, width="stretch")
-    sl_col, tp_col = st.columns(2)
-    stop_loss_pct = sl_col.number_input("止损比例（%，0=不启用）", min_value=0.0, max_value=50.0, value=0.0, step=1.0, key="lab_stop_loss") / 100.0
-    take_profit_pct = tp_col.number_input("止盈比例（%，0=不启用）", min_value=0.0, max_value=500.0, value=0.0, step=1.0, key="lab_take_profit") / 100.0
-    tr_col, br_col = st.columns(2)
-    trailing_stop_pct = tr_col.number_input("移动止损比例（%，0=不启用）", min_value=0.0, max_value=50.0, value=0.0, step=1.0, key="lab_trailing_stop") / 100.0
-    breakout_exit = br_col.checkbox("跌破箱体高点即离场", value=False, key="lab_breakout_exit")
 
-    if st.button("保存策略", disabled=not is_admin):
-        if not strategy_name:
-            st.error("请填写策略名称")
+    # ── 回测与记录（最常用，默认展开）──
+    with lab_bt:
+        saved_strategies = app.database.query_all("SELECT * FROM signal_strategies ORDER BY created_at DESC")
+        if not saved_strategies:
+            st.info("暂无已保存的策略，请先到「策略定义」标签页导入模板或自建策略")
         else:
-            entry_conds = _conditions_from_df(entry_df)
-            exit_conds = _conditions_from_df(exit_df)
-            if not entry_conds or not exit_conds:
-                st.error("买入和离场条件都至少需要一条")
+            selected_strategy_name = st.selectbox("选择策略", [s["name"] for s in saved_strategies], key="lab_bt_strategy")
+            strategy_row = next(s for s in saved_strategies if s["name"] == selected_strategy_name)
+            d1, d2 = st.columns(2)
+            lab_start = d1.date_input("开始日期", value=pd.Timestamp("2024-01-01"), key="lab_bt_start")
+            lab_end = d2.date_input("结束日期", value=pd.Timestamp.today(), key="lab_bt_end")
+            n1, n2, n3 = st.columns(3)
+            lab_cash = n1.number_input("初始资金", value=1_000_000.0, step=100_000.0, min_value=100_000.0, key="lab_bt_cash")
+            lab_maxpos = n2.number_input("最大持仓数", value=5, min_value=1, max_value=20, step=1, key="lab_bt_maxpos")
+            lab_exposure = n3.number_input("总仓位比例（%，留现金降回撤）", min_value=10, max_value=100, value=100, step=5, key="lab_bt_exposure") / 100.0
+            if st.button("运行回测", disabled=not is_admin):
+                try:
+                    entry_cfg = json.loads(strategy_row["entry_json"])
+                    engine = entry_cfg.get("engine")
+                    if engine == "hot_score":
+                        hot_metrics = run_hot_backtest(
+                            app.database, app.data, start_date=lab_start.strftime("%Y-%m-%d"),
+                            end_date=lab_end.strftime("%Y-%m-%d"), threshold=float(entry_cfg.get("threshold", 75)),
+                            max_positions=int(lab_maxpos), initial_cash=float(lab_cash),
+                            daily_budget=float(lab_exposure), sentiment_scope=str(entry_cfg.get("sentiment_scope", "hs")),
+                        )
+                    elif engine == "limit_pullback_score":
+                        hot_metrics = run_limit_pullback_backtest(
+                            app.database, app.data, start_date=lab_start.strftime("%Y-%m-%d"),
+                            end_date=lab_end.strftime("%Y-%m-%d"), threshold=float(entry_cfg.get("threshold", 50)),
+                            max_positions=int(lab_maxpos), initial_cash=float(lab_cash),
+                            daily_budget=float(lab_exposure),
+                        )
+                    else:
+                        hot_metrics = None
+                    if hot_metrics is not None:
+                        equity = hot_metrics.pop("equity", [])
+                        trades = hot_metrics.pop("trades", [])
+                        metrics = {
+                            "total_trades": hot_metrics["total_trades"], "win_rate": hot_metrics["win_rate"],
+                            "total_pnl": hot_metrics["final_equity"] - hot_metrics["initial_cash"],
+                            "total_return": hot_metrics["final_equity"] / hot_metrics["initial_cash"] - 1,
+                            "max_drawdown": hot_metrics["max_drawdown"],
+                        }
+                        st.session_state["lab_trades"] = trades
+                        st.session_state["lab_metrics"] = metrics
+                        st.session_state["lab_equity"] = equity
+                        st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
+                    else:
+                        exit_cfg = json.loads(strategy_row["exit_json"])
+                        factor_names = [c["factor"] for c in entry_cfg["conditions"]] + [c["factor"] for c in exit_cfg["conditions"]]
+                        exprs = resolve_factor_expressions(app.database, factor_names)
+                        trades, metrics, equity = run_signal_backtest(
+                            app.data, app.settings, exprs, entry_cfg, exit_cfg,
+                            lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
+                            initial_cash=float(lab_cash), max_positions=int(lab_maxpos), exposure=float(lab_exposure),
+                        )
+                        run_id = uuid4().hex
+                        app.database.execute(
+                            """INSERT INTO signal_backtest_runs(id,strategy_name,start_date,end_date,metrics_json,created_at)
+                               VALUES(?,?,?,?,?,?)""",
+                            (run_id, selected_strategy_name, lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
+                             json.dumps(metrics, ensure_ascii=False), utc_now_text()),
+                        )
+                        app.database.executemany(
+                            """INSERT INTO signal_trades(run_id,code,name,entry_date,entry_price,shares,exit_date,exit_price,pnl,pnl_pct,holding_days,status,entry_reason,exit_reason)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            [(run_id, t["code"], t["name"], t["entry_date"], t["entry_price"], t["shares"], t["exit_date"],
+                              t["exit_price"], t["pnl"], t["pnl_pct"], t["holding_days"], t["status"], t["entry_reason"], t["exit_reason"])
+                             for t in trades],
+                        )
+                        st.session_state["lab_trades"] = trades
+                        st.session_state["lab_metrics"] = metrics
+                        st.session_state["lab_equity"] = equity
+                        st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
+                except Exception as error:
+                    st.error(str(error))
+
+            if "lab_metrics" in st.session_state:
+                m = st.session_state["lab_metrics"]
+                cols = st.columns(5)
+                cols[0].metric("总交易笔数", m["total_trades"])
+                cols[1].metric("胜率", f"{m['win_rate']:.2%}")
+                cols[2].metric("总盈亏", f"¥{m['total_pnl']:,.0f}")
+                cols[3].metric("累计收益", f"{m['total_return']:.2%}")
+                cols[4].metric("最大回撤", f"{m['max_drawdown']:.2%}")
+                if st.session_state["lab_equity"]:
+                    eq_frame = pd.DataFrame(st.session_state["lab_equity"], columns=["日期", "资产净值"])
+                    st.line_chart(eq_frame, x="日期", y="资产净值", color="#36C98F")
+                if st.session_state["lab_trades"]:
+                    st.markdown("**本次回测逐笔交易**")
+                    st.dataframe(localize_dataframe(pd.DataFrame(st.session_state["lab_trades"])), width="stretch", hide_index=True)
+
+            st.markdown("**历史回测记录**")
+            runs = app.database.query_all("SELECT * FROM signal_backtest_runs ORDER BY created_at DESC LIMIT 20")
+            if runs:
+                run_labels = {r["id"]: f"{r['strategy_name']}（{r['start_date']}~{r['end_date']}）" for r in runs}
+                selected_run_id = st.selectbox("选择一次回测查看交易明细", list(run_labels), format_func=lambda rid: run_labels[rid], key="lab_run_sel")
+                run_trades = app.database.query_all("SELECT * FROM signal_trades WHERE run_id=? ORDER BY id", (selected_run_id,))
+                if run_trades:
+                    st.dataframe(localize_dataframe(pd.DataFrame(run_trades)), width="stretch", hide_index=True)
+                else:
+                    st.caption("该次回测没有产生交易")
+
+    # ── 盘中买点扫描 ──
+    with lab_scan:
+        st.caption("扫描「策略定义」中已勾选启用的策略，命中即推送邮件/企业微信。")
+        if st.button("立即扫描买点", disabled=not is_admin):
+            with st.spinner("正在拉取实时行情、公告与板块数据..."):
+                try:
+                    quotes = fetch_scan_quotes(app.data, app.database)
+                    has_candidates, report, html = build_buy_report(app.data, app.database, current_quotes=quotes)
+                    if has_candidates:
+                        app.notifications.send("盘中买点扫描", report, "INFO", html=html)
+                        st.success("发现买入候选，已发送邮件：")
+                        st.text(report)
+                    else:
+                        st.info("当前无符合条件的买入候选（未发送邮件）")
+                except Exception as error:
+                    st.error(str(error))
+
+    # ── 因子管理 ──
+    with lab_factor:
+        st.caption("因子公式基于日线 OHLCV 列 `open/high/low/close/volume/amount/pre_close`，可用 `shift/rolling/pct_change/ewm/diff/clip` 等 pandas 方法。")
+        with st.form("create_factor", clear_on_submit=True):
+            c1, c2 = st.columns([1, 3])
+            new_factor_name = c1.text_input("因子名（英文/数字/下划线）")
+            new_factor_expr = c2.text_input("公式表达式", placeholder="如 close/close.shift(5)-1")
+            create_factor_clicked = st.form_submit_button("创建因子", disabled=not is_admin)
+        if create_factor_clicked:
+            if not new_factor_name or not new_factor_expr:
+                st.error("请填写因子名与公式表达式")
             else:
-                entry_json = json.dumps({"combine": entry_combine, "conditions": entry_conds}, ensure_ascii=False)
-                exit_json = json.dumps({
-                    "combine": exit_combine, "conditions": exit_conds,
-                    "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct,
-                    "trailing_stop_pct": trailing_stop_pct, "breakout_exit": breakout_exit,
-                }, ensure_ascii=False)
+                try:
+                    evaluate_factor(new_factor_expr, _lab_sample_frame())
+                    app.database.execute(
+                        "INSERT INTO custom_factors(id,name,expression,created_at) VALUES(?,?,?,?)",
+                        (uuid4().hex, new_factor_name, new_factor_expr, utc_now_text()),
+                    )
+                    st.success(f"因子 `{new_factor_name}` 已创建")
+                except ValueError as error:
+                    st.error(str(error))
+
+        custom_factors = app.database.query_all("SELECT * FROM custom_factors ORDER BY created_at DESC")
+        if custom_factors:
+            st.markdown("**自定义因子**")
+            st.dataframe(pd.DataFrame([{"因子名": f["name"], "公式": f["expression"]} for f in custom_factors]), width="stretch", hide_index=True)
+            del_col, del_btn = st.columns([2, 1])
+            del_name = del_col.selectbox("删除因子", [f["name"] for f in custom_factors], key="lab_del_factor")
+            if del_btn.button("删除该因子", disabled=not is_admin):
+                app.database.execute("DELETE FROM custom_factors WHERE name=?", (del_name,))
+                st.rerun()
+
+        with st.expander("内置因子库（可一键导入，共 24 个）"):
+            st.dataframe(pd.DataFrame([{"因子名": k, "说明": v[0], "公式": v[1]} for k, v in BUILTIN_FACTOR_FORMULAS.items()]), width="stretch", hide_index=True)
+            imp_col, imp_btn = st.columns([2, 1])
+            import_name = imp_col.selectbox("选择内置因子", list(BUILTIN_FACTOR_FORMULAS), key="lab_import_factor")
+            if imp_btn.button("导入为自定义因子", disabled=not is_admin):
+                expr = BUILTIN_FACTOR_FORMULAS[import_name][1]
+                app.database.execute(
+                    "INSERT OR IGNORE INTO custom_factors(id,name,expression,created_at) VALUES(?,?,?,?)",
+                    (uuid4().hex, import_name, expr, utc_now_text()),
+                )
+                st.success(f"已导入因子 `{import_name}`")
+
+    # ── 策略定义 ──
+    with lab_strategy:
+        with st.expander("内置策略模板（可一键导入）"):
+            st.dataframe(
+                pd.DataFrame([{"策略": name, "说明": desc} for name, (desc, _e, _x) in BUILTIN_STRATEGY_TEMPLATES.items()]),
+                width="stretch", hide_index=True,
+            )
+            tmpl_col, tmpl_btn = st.columns([2, 1])
+            tmpl_name = tmpl_col.selectbox("选择策略模板", list(BUILTIN_STRATEGY_TEMPLATES), key="lab_import_strategy")
+            if tmpl_btn.button("导入该策略", disabled=not is_admin):
+                _desc, entry_cfg, exit_cfg = BUILTIN_STRATEGY_TEMPLATES[tmpl_name]
                 app.database.execute(
                     """INSERT INTO signal_strategies(id,name,entry_json,exit_json,created_at) VALUES(?,?,?,?,?)
                        ON CONFLICT(name) DO UPDATE SET entry_json=excluded.entry_json, exit_json=excluded.exit_json, created_at=excluded.created_at""",
-                    (uuid4().hex, strategy_name, entry_json, exit_json, utc_now_text()),
+                    (uuid4().hex, tmpl_name, json.dumps(entry_cfg, ensure_ascii=False), json.dumps(exit_cfg, ensure_ascii=False), utc_now_text()),
                 )
-                st.success(f"策略 `{strategy_name}` 已保存")
+                st.success(f"策略 `{tmpl_name}` 已导入，可在「回测与记录」或「盘中买点扫描」使用")
+        all_factor_names = [f["name"] for f in app.database.query_all("SELECT name FROM custom_factors")] + list(BUILTIN_FACTOR_FORMULAS)
+        all_factor_names = list(dict.fromkeys(all_factor_names))
+        cond_column_config = {
+            "factor": st.column_config.SelectboxColumn("因子", options=all_factor_names, required=True),
+            "op": st.column_config.SelectboxColumn("运算符", options=[">", "<", ">=", "<=", "==", "!="], required=True),
+            "value": st.column_config.NumberColumn("阈值", required=True),
+        }
+        empty_conds = pd.DataFrame(columns=["factor", "op", "value"])
+        strategy_name = st.text_input("策略名称", key="lab_strategy_name")
+        st.markdown("**买入条件**（满足方式）")
+        entry_combine = st.radio("买入满足方式", ["AND", "OR"], horizontal=True, key="lab_entry_combine")
+        entry_df = st.data_editor(empty_conds, num_rows="dynamic", key="lab_entry_editor", column_config=cond_column_config, width="stretch")
+        st.markdown("**离场条件**（满足方式）")
+        exit_combine = st.radio("离场满足方式", ["AND", "OR"], horizontal=True, key="lab_exit_combine")
+        exit_df = st.data_editor(empty_conds, num_rows="dynamic", key="lab_exit_editor", column_config=cond_column_config, width="stretch")
+        sl_col, tp_col = st.columns(2)
+        stop_loss_pct = sl_col.number_input("止损比例（%，0=不启用）", min_value=0.0, max_value=50.0, value=0.0, step=1.0, key="lab_stop_loss") / 100.0
+        take_profit_pct = tp_col.number_input("止盈比例（%，0=不启用）", min_value=0.0, max_value=500.0, value=0.0, step=1.0, key="lab_take_profit") / 100.0
+        tr_col, br_col = st.columns(2)
+        trailing_stop_pct = tr_col.number_input("移动止损比例（%，0=不启用）", min_value=0.0, max_value=50.0, value=0.0, step=1.0, key="lab_trailing_stop") / 100.0
+        breakout_exit = br_col.checkbox("跌破箱体高点即离场", value=False, key="lab_breakout_exit")
 
-    saved_strategies = app.database.query_all("SELECT name, enabled FROM signal_strategies ORDER BY created_at DESC")
-    if saved_strategies:
-        st.markdown("**已保存的策略（勾选 = 盘中扫描/推送邮箱，可删除）**")
-        for strat in saved_strategies:
-            c1, c2 = st.columns([4, 1])
-            new_enabled = c1.checkbox(strat["name"], value=bool(strat["enabled"]), key=f"en_{strat['name']}", disabled=not is_admin)
-            if is_admin and new_enabled != bool(strat["enabled"]):
-                app.database.execute("UPDATE signal_strategies SET enabled=? WHERE name=?", (int(new_enabled), strat["name"]))
-                st.rerun()
-            if c2.button("删除", key=f"delbtn_{strat['name']}", disabled=not is_admin):
-                app.database.execute("DELETE FROM signal_strategies WHERE name=?", (strat["name"],))
-                st.rerun()
-
-    st.divider()
-
-    # ③ 回测与记录
-    st.subheader("③ 回测与记录")
-    saved_strategies = app.database.query_all("SELECT * FROM signal_strategies ORDER BY created_at DESC")
-    if not saved_strategies:
-        st.info("请先在上面保存一个策略")
-    else:
-        selected_strategy_name = st.selectbox("选择策略", [s["name"] for s in saved_strategies], key="lab_bt_strategy")
-        strategy_row = next(s for s in saved_strategies if s["name"] == selected_strategy_name)
-        d1, d2 = st.columns(2)
-        lab_start = d1.date_input("开始日期", value=pd.Timestamp("2024-01-01"), key="lab_bt_start")
-        lab_end = d2.date_input("结束日期", value=pd.Timestamp.today(), key="lab_bt_end")
-        n1, n2, n3 = st.columns(3)
-        lab_cash = n1.number_input("初始资金", value=1_000_000.0, step=100_000.0, min_value=100_000.0, key="lab_bt_cash")
-        lab_maxpos = n2.number_input("最大持仓数", value=5, min_value=1, max_value=20, step=1, key="lab_bt_maxpos")
-        lab_exposure = n3.number_input("总仓位比例（%，留现金降回撤）", min_value=10, max_value=100, value=100, step=5, key="lab_bt_exposure") / 100.0
-        if st.button("运行回测", disabled=not is_admin):
-            try:
-                entry_cfg = json.loads(strategy_row["entry_json"])
-                engine = entry_cfg.get("engine")
-                if engine == "hot_score":
-                    hot_metrics = run_hot_backtest(
-                        app.database, app.data, start_date=lab_start.strftime("%Y-%m-%d"),
-                        end_date=lab_end.strftime("%Y-%m-%d"), threshold=float(entry_cfg.get("threshold", 75)),
-                        max_positions=int(lab_maxpos), initial_cash=float(lab_cash),
-                        daily_budget=float(lab_exposure), sentiment_scope=str(entry_cfg.get("sentiment_scope", "hs")),
-                    )
-                elif engine == "limit_pullback_score":
-                    hot_metrics = run_limit_pullback_backtest(
-                        app.database, app.data, start_date=lab_start.strftime("%Y-%m-%d"),
-                        end_date=lab_end.strftime("%Y-%m-%d"), threshold=float(entry_cfg.get("threshold", 50)),
-                        max_positions=int(lab_maxpos), initial_cash=float(lab_cash),
-                        daily_budget=float(lab_exposure),
-                    )
-                else:
-                    hot_metrics = None
-                if hot_metrics is not None:
-                    equity = hot_metrics.pop("equity", [])
-                    trades = hot_metrics.pop("trades", [])
-                    metrics = {
-                        "total_trades": hot_metrics["total_trades"], "win_rate": hot_metrics["win_rate"],
-                        "total_pnl": hot_metrics["final_equity"] - hot_metrics["initial_cash"],
-                        "total_return": hot_metrics["final_equity"] / hot_metrics["initial_cash"] - 1,
-                        "max_drawdown": hot_metrics["max_drawdown"],
-                    }
-                    st.session_state["lab_trades"] = trades
-                    st.session_state["lab_metrics"] = metrics
-                    st.session_state["lab_equity"] = equity
-                    st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
-                else:
-                    exit_cfg = json.loads(strategy_row["exit_json"])
-                    factor_names = [c["factor"] for c in entry_cfg["conditions"]] + [c["factor"] for c in exit_cfg["conditions"]]
-                    exprs = resolve_factor_expressions(app.database, factor_names)
-                    trades, metrics, equity = run_signal_backtest(
-                        app.data, app.settings, exprs, entry_cfg, exit_cfg,
-                        lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
-                        initial_cash=float(lab_cash), max_positions=int(lab_maxpos), exposure=float(lab_exposure),
-                    )
-                    run_id = uuid4().hex
-                    app.database.execute(
-                        """INSERT INTO signal_backtest_runs(id,strategy_name,start_date,end_date,metrics_json,created_at)
-                           VALUES(?,?,?,?,?,?)""",
-                        (run_id, selected_strategy_name, lab_start.strftime("%Y-%m-%d"), lab_end.strftime("%Y-%m-%d"),
-                         json.dumps(metrics, ensure_ascii=False), utc_now_text()),
-                    )
-                    app.database.executemany(
-                        """INSERT INTO signal_trades(run_id,code,name,entry_date,entry_price,shares,exit_date,exit_price,pnl,pnl_pct,holding_days,status,entry_reason,exit_reason)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        [(run_id, t["code"], t["name"], t["entry_date"], t["entry_price"], t["shares"], t["exit_date"],
-                          t["exit_price"], t["pnl"], t["pnl_pct"], t["holding_days"], t["status"], t["entry_reason"], t["exit_reason"])
-                         for t in trades],
-                    )
-                    st.session_state["lab_trades"] = trades
-                    st.session_state["lab_metrics"] = metrics
-                    st.session_state["lab_equity"] = equity
-                    st.success(f"回测完成，共 {metrics['total_trades']} 笔交易")
-            except Exception as error:
-                st.error(str(error))
-
-        if "lab_metrics" in st.session_state:
-            m = st.session_state["lab_metrics"]
-            cols = st.columns(5)
-            cols[0].metric("总交易笔数", m["total_trades"])
-            cols[1].metric("胜率", f"{m['win_rate']:.2%}")
-            cols[2].metric("总盈亏", f"¥{m['total_pnl']:,.0f}")
-            cols[3].metric("累计收益", f"{m['total_return']:.2%}")
-            cols[4].metric("最大回撤", f"{m['max_drawdown']:.2%}")
-            if st.session_state["lab_equity"]:
-                eq_frame = pd.DataFrame(st.session_state["lab_equity"], columns=["日期", "资产净值"])
-                st.line_chart(eq_frame, x="日期", y="资产净值", color="#36C98F")
-            if st.session_state["lab_trades"]:
-                st.markdown("**本次回测逐笔交易**")
-                st.dataframe(localize_dataframe(pd.DataFrame(st.session_state["lab_trades"])), width="stretch", hide_index=True)
-
-        st.markdown("**历史回测记录**")
-        runs = app.database.query_all("SELECT * FROM signal_backtest_runs ORDER BY created_at DESC LIMIT 20")
-        if runs:
-            run_labels = {r["id"]: f"{r['strategy_name']}（{r['start_date']}~{r['end_date']}）" for r in runs}
-            selected_run_id = st.selectbox("选择一次回测查看交易明细", list(run_labels), format_func=lambda rid: run_labels[rid], key="lab_run_sel")
-            run_trades = app.database.query_all("SELECT * FROM signal_trades WHERE run_id=? ORDER BY id", (selected_run_id,))
-            if run_trades:
-                st.dataframe(localize_dataframe(pd.DataFrame(run_trades)), width="stretch", hide_index=True)
+        if st.button("保存策略", disabled=not is_admin):
+            if not strategy_name:
+                st.error("请填写策略名称")
             else:
-                st.caption("该次回测没有产生交易")
-
-    st.divider()
-    st.subheader("④ 盘中买点扫描（实时行情 + 邮件）")
-    if st.button("立即扫描买点", disabled=not is_admin):
-        with st.spinner("正在拉取实时行情、公告与板块数据..."):
-            try:
-                quotes = fetch_scan_quotes(app.data, app.database)
-                has_candidates, report, html = build_buy_report(app.data, app.database, current_quotes=quotes)
-                if has_candidates:
-                    app.notifications.send("盘中买点扫描", report, "INFO", html=html)
-                    st.success("发现买入候选，已发送邮件：")
-                    st.text(report)
+                entry_conds = _conditions_from_df(entry_df)
+                exit_conds = _conditions_from_df(exit_df)
+                if not entry_conds or not exit_conds:
+                    st.error("买入和离场条件都至少需要一条")
                 else:
-                    st.info("当前无符合条件的买入候选（未发送邮件）")
-            except Exception as error:
-                st.error(str(error))
+                    entry_json = json.dumps({"combine": entry_combine, "conditions": entry_conds}, ensure_ascii=False)
+                    exit_json = json.dumps({
+                        "combine": exit_combine, "conditions": exit_conds,
+                        "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct,
+                        "trailing_stop_pct": trailing_stop_pct, "breakout_exit": breakout_exit,
+                    }, ensure_ascii=False)
+                    app.database.execute(
+                        """INSERT INTO signal_strategies(id,name,entry_json,exit_json,created_at) VALUES(?,?,?,?,?)
+                           ON CONFLICT(name) DO UPDATE SET entry_json=excluded.entry_json, exit_json=excluded.exit_json, created_at=excluded.created_at""",
+                        (uuid4().hex, strategy_name, entry_json, exit_json, utc_now_text()),
+                    )
+                    st.success(f"策略 `{strategy_name}` 已保存")
+
+        saved_strategies = app.database.query_all("SELECT name, enabled FROM signal_strategies ORDER BY created_at DESC")
+        if saved_strategies:
+            st.markdown("**已保存的策略（勾选 = 盘中扫描/推送邮箱，可删除）**")
+            for strat in saved_strategies:
+                c1, c2 = st.columns([4, 1])
+                new_enabled = c1.checkbox(strat["name"], value=bool(strat["enabled"]), key=f"en_{strat['name']}", disabled=not is_admin)
+                if is_admin and new_enabled != bool(strat["enabled"]):
+                    app.database.execute("UPDATE signal_strategies SET enabled=? WHERE name=?", (int(new_enabled), strat["name"]))
+                    st.rerun()
+                if c2.button("删除", key=f"delbtn_{strat['name']}", disabled=not is_admin):
+                    app.database.execute("DELETE FROM signal_strategies WHERE name=?", (strat["name"],))
+                    st.rerun()
 
 with overview:
     equity = frame("SELECT snapshot_date,total_equity,cash,market_value FROM account_snapshots WHERE account_id='paper' ORDER BY id")
