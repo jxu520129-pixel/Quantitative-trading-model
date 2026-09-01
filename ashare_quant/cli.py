@@ -127,7 +127,7 @@ def main() -> None:
     if args.command == "scheduler":
         run_scheduler(args.config)
         return
-    runtime = build_runtime(args.config)
+    runtime = build_runtime(args.config, prefer_hist_db=args.command in {"backtest", "pullback-backtest"})
     if args.command == "init-db":
         print_json({"database": str(runtime.settings.db_path), "mode": runtime.settings.mode, "status": "initialized"})
     elif args.command == "seed-demo":

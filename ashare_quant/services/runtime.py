@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..backtest import BacktestEngine
 from ..brokers.paper import PaperBroker
@@ -15,6 +16,10 @@ from ..trading_calendar import TradingCalendar
 from .control import SystemControl
 from .signals import SignalService
 from .trading import TradingService
+
+
+ROOT = Path(__file__).resolve().parents[1]
+HIST_DB = ROOT / "data" / "ashare_quant_hist.db"
 
 
 @dataclass(frozen=True)
@@ -34,11 +39,20 @@ class Runtime:
     calendar: TradingCalendar
 
 
-def build_runtime(config_path: str | None = None) -> Runtime:
-    """加载配置并装配全部服务依赖，返回可用的 Runtime（CLI/调度器/看板/测试共用）。"""
+def build_runtime(config_path: str | None = None, prefer_hist_db: bool = False) -> Runtime:
+    """加载配置并装配全部服务依赖，返回可用的 Runtime（CLI/调度器/看板/测试共用）。
+
+    ``prefer_hist_db=True`` 时优先用 ``data/ashare_quant_hist.db``（全市场真实历史库，
+    适合回测），仅在该文件存在时生效；否则退回 ``settings.db_path``（默认演示库，
+    适合实盘/调度）。hist 库不会被 ``initialize``（它已经有完整数据，且
+    initialize 会插入演示初始 cash/strategy_enabled 污染回测）。
+    """
     settings = load_settings(config_path)
-    database = Database(settings.db_path)
-    database.initialize(settings.paper_initial_cash)
+    use_hist = prefer_hist_db and HIST_DB.exists()
+    db_path = HIST_DB if use_hist else settings.db_path
+    database = Database(db_path)
+    if not use_hist:
+        database.initialize(settings.paper_initial_cash)
     notifications = NotificationHub(settings)
     data = DataService(database, settings)
     risk = RiskManager(database, settings)
