@@ -226,16 +226,36 @@ with lab_tab:
         if not saved_strategies:
             st.info("暂无已保存的策略，请先到「策略定义」标签页导入模板或自建策略")
         else:
-            selected_strategy_name = st.selectbox("选择策略", [s["name"] for s in saved_strategies], key="lab_bt_strategy")
+            selected_strategy_name = st.selectbox(
+                "📌 选择策略", [s["name"] for s in saved_strategies], key="lab_bt_strategy"
+            )
             strategy_row = next(s for s in saved_strategies if s["name"] == selected_strategy_name)
-            d1, d2 = st.columns(2)
-            lab_start = d1.date_input("开始日期", value=pd.Timestamp("2024-01-01"), key="lab_bt_start")
-            lab_end = d2.date_input("结束日期", value=pd.Timestamp.today(), key="lab_bt_end")
-            n1, n2, n3 = st.columns(3)
-            lab_cash = n1.number_input("初始资金", value=1_000_000.0, step=100_000.0, min_value=100_000.0, key="lab_bt_cash")
-            lab_maxpos = n2.number_input("最大持仓数", value=5, min_value=1, max_value=20, step=1, key="lab_bt_maxpos")
-            lab_exposure = n3.number_input("总仓位比例（%，留现金降回撤）", min_value=10, max_value=100, value=100, step=5, key="lab_bt_exposure") / 100.0
-            if st.button("运行回测", disabled=not is_admin):
+
+            st.markdown("**区间快捷**")
+            rb = st.columns([1, 1, 1, 1, 1, 2])
+            if rb[0].button("近 1 年", use_container_width=True):
+                st.session_state["lab_bt_start"] = pd.Timestamp.today() - pd.DateOffset(years=1)
+            if rb[1].button("近 2 年", use_container_width=True):
+                st.session_state["lab_bt_start"] = pd.Timestamp.today() - pd.DateOffset(years=2)
+            if rb[2].button("近 3 年", use_container_width=True):
+                st.session_state["lab_bt_start"] = pd.Timestamp.today() - pd.DateOffset(years=3)
+            if rb[3].button("近 5 年", use_container_width=True):
+                st.session_state["lab_bt_start"] = pd.Timestamp.today() - pd.DateOffset(years=5)
+            if rb[4].button("全 部", use_container_width=True):
+                st.session_state["lab_bt_start"] = pd.Timestamp("2020-01-01")
+
+            with st.form("lab_bt_form", clear_on_submit=False):
+                p = st.columns(5)
+                lab_start = p[0].date_input("开始", value=pd.Timestamp("2024-01-01"), key="lab_bt_start")
+                lab_end = p[1].date_input("结束", value=pd.Timestamp.today(), key="lab_bt_end")
+                lab_cash = p[2].number_input("初始资金", value=1_000_000.0, step=100_000.0, min_value=100_000.0, key="lab_bt_cash")
+                lab_maxpos = p[3].number_input("最大持仓数", value=5, min_value=1, max_value=20, step=1, key="lab_bt_maxpos")
+                lab_exposure = p[4].number_input("仓位比例（%）", min_value=10, max_value=100, value=100, step=5, key="lab_bt_exposure") / 100.0
+                submitted = st.form_submit_button(
+                    "🚀 运行回测", type="primary", disabled=not is_admin, use_container_width=True
+                )
+
+            if submitted:
                 try:
                     entry_cfg = json.loads(strategy_row["entry_json"])
                     engine = entry_cfg.get("engine")
