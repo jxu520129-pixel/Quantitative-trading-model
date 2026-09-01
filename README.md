@@ -170,17 +170,20 @@ python -m ashare_quant.cli hot-backtest        # 人气热度共振回测（落�
 python -m ashare_quant.cli pullback-backtest   # 涨停回马枪回测（落库供看板展示）
 ```
 
+CLI 的 `backtest` / `pullback-backtest` 等回测命令会**优先使用 `data/ashare_quant_hist.db`**（全市场真实历史库，存在即用）；其余命令（实盘/调度/看板）仍用默认演示库 `settings.db_path`。因此云端/本地要跑出真实回测，需先执行上面的 `fetch_hist_data.py` 拉好 hist 库。
+
 看板「因子实验室」内置两个策略模板（`engine=hot_score` / `engine=limit_pullback_score`），保存后即可在因子实验室里跑回测。
 
 短线策略需全市场历史日线，演示库（30 只）无法回测，可拉取全市场历史数据到独立库：
 
 ```powershell
-python scripts/fetch_hist_data.py --start 2023-07-01 --end 2026-08-28   # 拉全市场日线（前复权）到 data/ashare_quant_hist.db
+python scripts/fetch_hist_data.py --start 2020-01-01 --end 2026-08-28   # 拉全市场日线（前复权）到 data/ashare_quant_hist.db
 python scripts/backtest_compare.py              # 基线 vs 优化对比
 python scripts/scan_pullback_params.py          # 止损/止盈/信号参数扫描
+python scripts/walk_forward.py                  # 涨停回马枪滚动样本外验证
 ```
 
-`fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。默认以 `--workers 4` 并发预取多天数据（按日期顺序消费、保证前复权 `pre_close` 链正确），代理限流时可降到 `1`（串行）。
+`fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。**股票列表拉取「上市 + 退市」两类**（修复幸存者偏差，`stock_basic` 表含 `delist_date` 字段），退市股按「退市日前最后交易日」补拉前复权基准。凭据**优先读环境变量**（兼容 Docker `env_file` 注入，容器内无 `.env` 文件），其次读 `.env` 文件。接口限流（如「请求速度过快」）会自动退避重试（最多 5 次）；仍触发时把 `--workers` 降到 `1`（串行）。
 
 > `hist` 库与默认演示库有三个数据口径差异，直接写回测/查询脚本时需注意：① `trade_date` 为 `YYYYMMDD` 紧凑格式（SQL 字符串比较勿用 `YYYY-MM-DD`，否则会静默漏掉后续年份数据）；② `amount` 单位是「千元」（默认演示库是「元」），成交额过滤阈值需按千元填（2000 万 = `20000`）；③ 次新股（创业板/科创板）前复权可能因 `adj_factor` 缺失出现单日 ±30% 以上假收益，`ashare_quant/portfolio.py` 加载时已自动过滤。
 
@@ -435,6 +438,15 @@ cd ~/ashare-quant && git pull && sudo docker compose up -d --build
 ```
 
 要点：数据（SQLite + 模型）存于 `quant-data` 数据卷，重建容器不丢数据（切勿 `docker compose down -v`）；`.env` 不进 git，云端本地保留；`config/default.yaml` 是版本化文件，云端若需覆盖参数用 `config/local.yaml` + `.env` 的 `QUANT_CONFIG` 指向，避免 `git pull` 冲突；看板端口 8501 需在云控制台防火墙放行。
+
+**云端拉取回测数据**：`data/*.db` 在 `.gitignore` 中、不随 git 上传，因此云端首次（或数据重建后）需在容器内拉一次全市场历史库，否则回测会退化为演示库（30 只，回测 0 笔交易）。前提是 `.env` 已配置 `TUSHARE_TOKEN` 与 `TUSHARE_API_URL`（`docker compose up -d --build` 重建后经 `env_file` 注入容器）：
+
+```bash
+# 云端（OrcaTerm 网页终端即可，无需 SSH）
+docker exec ashare-quant-scheduler-1 python scripts/fetch_hist_data.py --start 2020-01-01 --end 2026-08-28 --workers 2
+```
+
+拉完验证：`docker exec ashare-quant-scheduler-1 python -c "import sqlite3;c=sqlite3.connect('/app/data/ashare_quant_hist.db');print(c.execute('SELECT COUNT(*) FROM stock_basic').fetchone()[0])"` 应输出约 5552。通知（邮件/企业微信）也依赖 `.env` 中的 `SMTP_*` / `WECOM_WEBHOOK`，同样需在云端 `.env` 配置后重建。
 
 ## QMT、PTrade 与东方财富
 
