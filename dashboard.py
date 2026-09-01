@@ -63,6 +63,40 @@ def execution_summary(outcome: dict[str, int]) -> str:
     ])
 
 
+def _equity_chart_with_marks(equity_curve: list, trades: list) -> None:
+    """净值曲线叠加买卖点标注（买入红▲、卖出绿▼，涨红跌绿）。"""
+    import altair as alt
+
+    eq_df = pd.DataFrame(equity_curve, columns=["日期", "资产净值"])
+    eq_df["日期"] = pd.to_datetime(eq_df["日期"])
+    equity_map = dict(zip(eq_df["日期"].dt.strftime("%Y-%m-%d"), eq_df["资产净值"]))
+    buys, sells = [], []
+    for t in trades:
+        entry = str(t.get("entry_date", ""))[:10]
+        exit_ = str(t.get("exit_date", ""))[:10]
+        if entry in equity_map:
+            buys.append({"日期": entry, "净值": equity_map[entry]})
+        if exit_ in equity_map:
+            sells.append({"日期": exit_, "净值": equity_map[exit_]})
+    line = alt.Chart(eq_df).mark_line(color="#36C98F", strokeWidth=1.6).encode(
+        x=alt.X("日期:T", title=None), y=alt.Y("资产净值:Q", title=None, scale=alt.Scale(zero=False))
+    )
+    chart = line
+    if buys:
+        bdf = pd.DataFrame(buys)
+        bdf["日期"] = pd.to_datetime(bdf["日期"])
+        chart = chart + alt.Chart(bdf).mark_point(color="#ff6b6b", shape="triangle-up", size=80, filled=True).encode(
+            x="日期:T", y="净值:Q", tooltip=["日期", "净值"]
+        )
+    if sells:
+        sdf = pd.DataFrame(sells)
+        sdf["日期"] = pd.to_datetime(sdf["日期"])
+        chart = chart + alt.Chart(sdf).mark_point(color="#36C98F", shape="triangle-down", size=80, filled=True).encode(
+            x="日期:T", y="净值:Q", tooltip=["日期", "净值"]
+        )
+    st.altair_chart(chart.properties(height=320), use_container_width=True)
+
+
 def _lab_sample_frame(periods: int = 220) -> pd.DataFrame:
     """用于校验公式语法的最小合成行情。"""
     return pd.DataFrame({
@@ -273,11 +307,18 @@ with lab_tab:
                 cols[3].metric("累计收益", f"{m['total_return']:.2%}")
                 cols[4].metric("最大回撤", f"{m['max_drawdown']:.2%}")
                 if st.session_state["lab_equity"]:
-                    eq_frame = pd.DataFrame(st.session_state["lab_equity"], columns=["日期", "资产净值"])
-                    st.line_chart(eq_frame, x="日期", y="资产净值", color="#36C98F")
+                    st.markdown("**净值曲线**（🔺 买入 · 🔻 卖出）")
+                    _equity_chart_with_marks(st.session_state["lab_equity"], st.session_state.get("lab_trades", []))
                 if st.session_state["lab_trades"]:
                     st.markdown("**本次回测逐笔交易**")
-                    st.dataframe(localize_dataframe(pd.DataFrame(st.session_state["lab_trades"])), width="stretch", hide_index=True)
+                    trades_df = localize_dataframe(pd.DataFrame(st.session_state["lab_trades"]))
+                    color_cols = [c for c in ("盈亏金额", "盈亏率") if c in trades_df.columns]
+                    if color_cols:
+                        trades_df = trades_df.style.map(
+                            lambda v: "color: #ff6b6b" if (pd.notna(v) and v > 0) else ("color: #36C98F" if (pd.notna(v) and v < 0) else ""),
+                            subset=color_cols,
+                        )
+                    st.dataframe(trades_df, width="stretch", hide_index=True)
 
             st.markdown("**历史回测记录**")
             runs = app.database.query_all("SELECT * FROM signal_backtest_runs ORDER BY created_at DESC LIMIT 20")
@@ -454,13 +495,17 @@ with overview:
             f" · 共 {len(equity)} 个交易日 · 初始资金 ¥{initial_cash:,.0f}"
         )
         st.subheader("累计收益率（%）")
+        range_opt = st.radio("净值区间", ["近30天", "近90天", "近一年", "全部"], index=1, horizontal=True, key="overview_range")
+        n_days = {"近30天": 30, "近90天": 90, "近一年": 250, "全部": 10**9}[range_opt]
+        plot_eq = equity.tail(n_days) if n_days < 10**9 else equity
+        plot_display = display_equity.tail(n_days) if n_days < 10**9 else display_equity
         returns_frame = pd.DataFrame({
-            "净值日期": display_equity["净值日期"],
-            "累计收益率": (equity["total_equity"] / initial_cash - 1) * 100,
+            "净值日期": plot_display["净值日期"],
+            "累计收益率": (plot_eq["total_equity"] / initial_cash - 1) * 100,
         })
         st.line_chart(returns_frame, x="净值日期", y="累计收益率", color="#36C98F")
         st.subheader("资产构成")
-        st.line_chart(display_equity, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#36C98F", "#8A99A6", "#E7B85C"])
+        st.line_chart(plot_display, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#36C98F", "#8A99A6", "#E7B85C"])
 with holdings:
     refresh_seconds = st.selectbox(
         "浮动盈亏实时刷新间隔（秒，0=暂停刷新）",
