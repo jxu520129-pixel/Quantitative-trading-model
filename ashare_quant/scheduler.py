@@ -96,13 +96,19 @@ def intraday_buy_scan(runtime: Runtime) -> None:
 
 
 def pre_market_scan(runtime: Runtime) -> None:
-    """盘前流程（09:25）：抓事件→更新宏观→形成候选池→推送富文本报告。"""
+    """盘前流程（09:25）：抓事件→更新宏观→拉集合竞价行情→形成候选池→推送富文本报告。"""
     if _skip_if_holiday(runtime, "盘前主升浪扫描"):
         return
     # 抓取全球事件（LLM 抽取）+ 更新宏观状态
     update_fundamentals(runtime.database)
+    # 拉取集合竞价实时行情（保证报告里的价格是当日而非过时的历史 bar）
+    try:
+        quotes = fetch_scan_quotes(runtime.data, runtime.database)
+    except Exception:
+        LOG.exception("盘前集合竞价行情拉取失败，回退到日线收盘价")
+        quotes = {}
     # 形成盘前候选池 + 生成富文本报告（纯文本 + HTML）
-    has_candidates, report, html = generate_main_rally_report(runtime)
+    has_candidates, report, html = generate_main_rally_report(runtime, current_quotes=quotes)
     if not has_candidates:
         return
     runtime.notifications.send("盘前主升浪扫描", report, "INFO", html=html)

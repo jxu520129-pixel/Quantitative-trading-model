@@ -189,7 +189,7 @@ def technical_score(factors: dict[str, float]) -> float:
     return _clip(score)
 
 
-def score_main_rally_candidates(runtime: Any) -> list[dict[str, Any]]:
+def score_main_rally_candidates(runtime: Any, current_quotes: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """对「主升浪·启动突破」候选打分排序，返回完整评分明细。"""
     from .lab import fetch_industries, find_buy_candidates
 
@@ -200,7 +200,8 @@ def score_main_rally_candidates(runtime: Any) -> list[dict[str, Any]]:
     min_price = float(sc.get("min_price", 0) or 0) or None
     min_amt = float(sc.get("min_average_amount", 0) or 0) or None
     candidates = find_buy_candidates(
-        runtime.data, runtime.database, max_price=max_price, min_price=min_price,
+        runtime.data, runtime.database, current_quotes=current_quotes,
+        max_price=max_price, min_price=min_price,
         min_average_amount=min_amt, strategy_names=["主升浪·启动突破"],
     )
     # 按需补全候选的行业数据（避免逐个全市场拉取）
@@ -473,9 +474,13 @@ def format_main_rally_report_html(database: Database, results: list[dict[str, An
     return "".join(parts)
 
 
-def generate_main_rally_report(runtime: Any) -> tuple[bool, str, str]:
-    """生成主升浪候选报告，返回 (是否有候选, 纯文本报告, HTML 富文本报告)。"""
-    results = score_main_rally_candidates(runtime)
+def generate_main_rally_report(runtime: Any, current_quotes: dict[str, float] | None = None) -> tuple[bool, str, str]:
+    """生成主升浪候选报告，返回 (是否有候选, 纯文本报告, HTML 富文本报告)。
+
+    ``current_quotes`` 为可选的实时行情（代码→价格），盘前扫描会传入以保证价格是
+    集合竞价价而非过时的数据库 bar。
+    """
+    results = score_main_rally_candidates(runtime, current_quotes=current_quotes)
     if not results:
         return False, "今日无主升浪候选", "<p>今日无主升浪候选</p>"
     sections = [format_main_rally_report(runtime.database, r, runtime.settings) for r in results[:10]]
