@@ -134,11 +134,16 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 | `liquidity` | 流动性 | 成交额、Amihud 非流动性 |
 | `rsi_mean_reversion` | RSI 超卖反转 | RSI |
 | `enhanced_multifactor` | 增强多因子 | 动量、反转、波动率、流动性、52 周新高 |
-| `lab_signal` | **因子实验室自定义策略** | 读取 `signal_strategies` 表中所有「已启用」策略，命中者按条件因子横截面 z-score 加权打分 |
+| `lab_signal` | **因子实验室自定义策略** | 读取 `signal_strategies` 表中所有「已启用」策略，条件类按因子 z-score 加权、内置引擎类（涨停回马枪）按形态打分，合并排序生成调仓信号 |
 
 因子窗口等参数可用 `{因子名}_{参数名}` 覆盖，例如在 `strategies` 下设置 `momentum_window: 120` 或 `macd_fast: 10`。
 
-`lab_signal` 是特殊策略：它不写死因子，而是运行你在「因子实验室 → 策略定义」里保存并勾选启用的自定义策略（`signal_strategies` 表），把这些策略的命中标的合并打分后生成调仓信号。把 `strategy.active` 设为 `lab_signal`（或 CLI `--strategy lab_signal`）即可用自定义策略跑模拟盘。
+`lab_signal` 是特殊策略：它不写死因子，而是运行你在「因子实验室 → 策略定义」里保存并勾选启用的自定义策略（`signal_strategies` 表），把这些策略的命中标的合并打分后生成调仓信号。两类策略都支持：
+
+- **条件类策略**（如箱体突破、主升浪、超跌反弹）：在候选池内逐股判断是否命中买入条件，命中者按「条件因子横截面 z-score 加权」打分（方向由运算符决定，`>`/`>=` 越高越好、`<`/`<=` 越低越好）。
+- **内置引擎类策略**（`engine=limit_pullback_score` 涨停回马枪）：复用 `scan_limit_pullback_signals` 扫描最新交易日「涨停→冲高→回调→信号②放量阳线」形态，命中（score ≥ threshold）的信号按 `(score - threshold) / 10` 归一化到与条件类 z-score 可比的量纲后并入排序（含大盘闸门：前日涨停家数 ≥ `min_limit_up`）。
+
+把 `strategy.active` 设为 `lab_signal`（或 CLI `--strategy lab_signal`）即可用自定义策略跑模拟盘。
 
 ## 短线情绪策略（人气热度共振 × 涨停回马枪）
 
