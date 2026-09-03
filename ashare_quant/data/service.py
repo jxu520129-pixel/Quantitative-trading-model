@@ -25,10 +25,21 @@ class DataService:
     def __init__(self, database: Database, settings: Settings):
         self.database = database
         self.settings = settings
-        self.primary: MarketDataProvider = AkShareProvider()
+        primary_name = str(settings.data.get("primary", "akshare")).lower()
+        fallback_name = str(settings.data.get("fallback", "tushare")).lower()
+        self.primary: MarketDataProvider = self._build_provider(primary_name, settings)
         self.fallback: MarketDataProvider | None = (
-            TushareProvider(settings.tushare_token, settings.tushare_api_url) if settings.tushare_token else None
+            self._build_provider(fallback_name, settings) if fallback_name != primary_name else None
         )
+
+    @staticmethod
+    def _build_provider(name: str, settings: Settings) -> MarketDataProvider:
+        """按 ``data.primary``/``data.fallback`` 构建数据源；tushare 缺 token 时回退 akshare。"""
+        if name == "tushare":
+            if settings.tushare_token:
+                return TushareProvider(settings.tushare_token, settings.tushare_api_url)
+            LOG.warning("配置 data.primary=tushare 但缺少 TUSHARE_TOKEN，回退 akshare")
+        return AkShareProvider()
 
     def refresh_universe(self) -> int:
         """拉取并落库证券列表（仅保留 V1 支持标的），并尽力刷新指数成分股。"""
@@ -54,7 +65,9 @@ class DataService:
             rows,
         )
         try:
-            members = self.primary.index_constituents(str(self.settings.data["stock_universe_index"]))  # type: ignore[attr-defined]
+            # 指数成分股仅 akshare 提供；tushare 主源时用 akshare 兜底拉成分股
+            provider = self.primary if hasattr(self.primary, "index_constituents") else AkShareProvider()
+            members = provider.index_constituents(str(self.settings.data["stock_universe_index"]))
             codes = list(dict.fromkeys(str(code).zfill(6) for code in members["code"].tolist()))
             self.database.execute("DELETE FROM universe_members WHERE universe_code=?", (str(self.settings.data["stock_universe_index"]),))
             self.database.executemany(

@@ -18,8 +18,10 @@ risk:
   max_consecutive_failures: 3
 
 data:
-  primary: akshare
-  fallback: tushare
+  # 主数据源用 Tushare（付费代理更稳定）；akshare 依赖免费新浪接口，高频拉取易被 SSL 重置/封禁，
+  # 故仅作备用。若未配置 TUSHARE_TOKEN 则回退 akshare。
+  primary: tushare
+  fallback: akshare
   include_etf: true
   stock_universe_index: "000300"
   history_start: "2020-01-01"
