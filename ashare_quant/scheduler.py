@@ -37,6 +37,15 @@ def after_close(runtime: Runtime) -> None:
     if not runtime.database.query_one("SELECT 1 FROM stock_basic LIMIT 1"):
         runtime.data.refresh_universe()
     update = runtime.data.update_daily()
+    # 数据完整性闸门：最新交易日覆盖率不足则推迟买点扫描与信号生成，避免推送过期收盘价
+    if not runtime.data.daily_data_complete():
+        runtime.notifications.send(
+            "盘后流程推迟",
+            f"今日日线数据拉取不完整（更新结果={update}），买点扫描与信号生成已推迟，避免用过期价格推送。",
+            "WARNING",
+        )
+        LOG.warning("今日日线数据不完整（%s），推迟盘后买点扫描与信号生成", update)
+        return
     has_candidates, buy_report, buy_html = build_buy_report(runtime.data, runtime.database, exclude_prefix="主升浪")
     if has_candidates:
         runtime.notifications.send("买点扫描", buy_report, "INFO", html=buy_html)

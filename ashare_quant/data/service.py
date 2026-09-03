@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Iterable
 
@@ -65,7 +66,11 @@ class DataService:
         return len(rows)
 
     def update_daily(self, codes: Iterable[str] | None = None, end_date: str | None = None) -> dict[str, int]:
-        """增量更新日线：并发拉取（并发数由 data.update_concurrency 控制），失败标的隔离不影响整体。"""
+        """增量更新日线：并发拉取（并发数由 data.update_concurrency 控制），失败标的隔离不影响整体。
+
+        单轮结束后，若失败标的占比超过 ``data.update_retry_failure_ratio``（默认 30%），
+        自动降并发到 1 对失败标的补拉一轮，缓解数据源限流导致的「当日数据大面积缺失」。
+        """
         if codes is None:
             eligible = self.eligible_universe(limit=int(self.settings.data["max_update_symbols"]))
             codes = eligible["code"].tolist()
@@ -80,7 +85,7 @@ class DataService:
             for row in self.database.query_all("SELECT code, MAX(trade_date) AS last_date FROM daily_bars GROUP BY code")
         }
 
-        def _update_one(code: str) -> dict[str, int]:
+        def _update_one(code: str) -> dict[str, object]:
             security_type = security_types.get(code, "STOCK")
             previous = last_dates.get(code)
             if previous:
@@ -90,29 +95,65 @@ class DataService:
             try:
                 frame = self._with_fallback("daily_bars", code, start, end_date or today_text(), security_type)
                 count = self.store_bars(code, frame)
-                return {"updated": 1, "bars": count, "failed": 0}
+                return {"updated": 1, "bars": count, "failed": 0, "code": code}
             except Exception as error:
-                LOG.exception("证券 %s 日线更新失败：%s", code, error)
-                return {"updated": 0, "bars": 0, "failed": 1}
+                LOG.warning("证券 %s 日线更新失败：%s", code, error)
+                return {"updated": 0, "bars": 0, "failed": 1, "code": code}
 
-        concurrency = int(self.settings.data.get("update_concurrency", 4) or 4)
-        result = {"updated_symbols": 0, "bars": 0, "failed": 0}
-        if concurrency <= 1 or len(normalized) <= 1:
-            for code in normalized:
-                item = _update_one(code)
-                result["updated_symbols"] += item["updated"]
-                result["bars"] += item["bars"]
-                result["failed"] += item["failed"]
-        else:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                futures = [pool.submit(_update_one, code) for code in normalized]
-                for future in as_completed(futures):
-                    item = future.result()
-                    result["updated_symbols"] += item["updated"]
-                    result["bars"] += item["bars"]
-                    result["failed"] += item["failed"]
+        def _run(codes: list[str], concurrency: int) -> tuple[dict[str, int], list[str]]:
+            result = {"updated_symbols": 0, "bars": 0, "failed": 0}
+            failed_codes: list[str] = []
+            if concurrency <= 1 or len(codes) <= 1:
+                for code in codes:
+                    item = _update_one(code)
+                    result["updated_symbols"] += int(item["updated"])
+                    result["bars"] += int(item["bars"])
+                    result["failed"] += int(item["failed"])
+                    if item["failed"]:
+                        failed_codes.append(str(item["code"]))
+            else:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    futures = [pool.submit(_update_one, code) for code in codes]
+                    for future in as_completed(futures):
+                        item = future.result()
+                        result["updated_symbols"] += int(item["updated"])
+                        result["bars"] += int(item["bars"])
+                        result["failed"] += int(item["failed"])
+                        if item["failed"]:
+                            failed_codes.append(str(item["code"]))
+            return result, failed_codes
+
+        concurrency = int(self.settings.data.get("update_concurrency", 2) or 2)
+        result, failed_codes = _run(normalized, concurrency)
+
+        # 整批重试：失败占比超阈值时降并发补拉，规避限流导致的当日大面积缺失
+        retry_ratio = float(self.settings.data.get("update_retry_failure_ratio", 0.30) or 0.30)
+        if failed_codes and normalized and (len(failed_codes) / len(normalized)) > retry_ratio:
+            LOG.warning("日线更新失败 %s/%s 超阈值，降并发=1 补拉失败标的", len(failed_codes), len(normalized))
+            time.sleep(2)  # 稍候让限流窗口冷却
+            retry_result, retry_failed = _run(failed_codes, 1)
+            result["updated_symbols"] += retry_result["updated_symbols"]
+            result["bars"] += retry_result["bars"]
+            result["failed"] = retry_result["failed"]
         return result
+
+    def daily_data_complete(self, threshold: float | None = None) -> bool:
+        """最新交易日日线覆盖率是否达标（盘后流程闸门，避免用过期收盘价推送）。
+
+        以「最新交易日条数 / 前一交易日条数」近似覆盖率；低于 ``data.min_daily_coverage``
+        （默认 0.80）判定为当日数据拉取不完整。
+        """
+        threshold = threshold if threshold is not None else float(self.settings.data.get("min_daily_coverage", 0.80) or 0.80)
+        rows = self.database.query_all(
+            "SELECT trade_date, COUNT(*) AS cnt FROM daily_bars GROUP BY trade_date ORDER BY trade_date DESC LIMIT 2"
+        )
+        if len(rows) < 2:
+            return True  # 只有一天数据，无从对比，视作完整
+        latest, previous = int(rows[0]["cnt"]), int(rows[1]["cnt"])
+        if previous <= 0:
+            return True
+        return (latest / previous) >= threshold
 
     def store_bars(self, code: str, frame: pd.DataFrame) -> int:
         """清洗并落库单只标的日线（按交易日去重、UPSERT），返回写入条数。"""

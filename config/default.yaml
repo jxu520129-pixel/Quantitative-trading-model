@@ -25,13 +25,18 @@ data:
   history_start: "2020-01-01"
   max_update_symbols: 7000
   # 日线增量更新的并发拉取数：值越大越快，但过高可能触发数据源限流/封 IP。
-  # 2核2G 小服务器建议 4；数据源频繁报错时调小到 1~2（1=串行）。
-  update_concurrency: 4
+  # 数据源（akshare/tushare 代理）频繁报「请求速度过快」时调小到 1~2（1=串行）。
+  # 默认降到 2：并发 4 在 7000 只标的场景下易触发限流，导致当日数据大面积缺失。
+  update_concurrency: 2
+  # 单轮增量更新后，失败标的占比超过该阈值时自动降并发（=1）对失败标的补拉一轮。
+  update_retry_failure_ratio: 0.30
+  # 盘后流程的数据完整性闸门：最新交易日日线覆盖率低于该阈值时，推迟买点扫描与信号生成。
+  min_daily_coverage: 0.80
   strategy_scan_symbols: 2000
   backtest_max_symbols: 7000
 
 strategy:
-  active: momentum_rotation
+  active: lab_signal
 
 strategies:
   momentum_rotation:
