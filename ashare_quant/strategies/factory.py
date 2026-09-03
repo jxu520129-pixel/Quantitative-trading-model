@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .base import BaseStrategy
 from .factor_strategy import FACTOR_STRATEGIES
+from .lab_signal import LabSignalStrategy
 from .moving_average import DualMovingAverageStrategy
 from .momentum import MomentumRotationStrategy
 
@@ -11,6 +12,7 @@ from .momentum import MomentumRotationStrategy
 STRATEGIES: dict[str, type[BaseStrategy]] = {
     "momentum_rotation": MomentumRotationStrategy,
     "dual_moving_average": DualMovingAverageStrategy,
+    "lab_signal": LabSignalStrategy,
     **FACTOR_STRATEGIES,
 }
 

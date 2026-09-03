@@ -40,6 +40,9 @@ strategies:
   dual_moving_average:
     fast_window: 10
     slow_window: 30
+  # 因子实验室自定义策略：运行 signal_strategies 表中所有「已启用」的策略，合并打分调仓。
+  # 无需额外参数；将 strategy.active 设为 lab_signal 即启用。
+  lab_signal: {}
   simple_multifactor:
     lookback_days: 20
     momentum_window: 20

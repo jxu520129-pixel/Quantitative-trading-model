@@ -41,7 +41,11 @@ class SignalService:
         if universe.empty:
             raise RuntimeError(f"{effective_date} 没有可用于生成信号的当期日线数据")
         held = {row["code"] for row in self.database.query_all("SELECT code FROM positions WHERE quantity>0")}
-        strategy = build_strategy(strategy_name, dict(self.settings.strategies[strategy_name]))
+        params = dict(self.settings.strategies.get(strategy_name, {}))
+        # lab_signal 适配器需要访问数据库读取 signal_strategies 表
+        if strategy_name == "lab_signal":
+            params["_database"] = self.database
+        strategy = build_strategy(strategy_name, params)
         signals = strategy.generate(StrategyContext(
             as_of_date=effective_date, universe=universe, bars_by_code=bars_by_code,
             held_codes=held, max_positions=int(self.settings.risk["max_positions"]),
