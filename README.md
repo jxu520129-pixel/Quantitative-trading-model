@@ -86,7 +86,7 @@ python -m ashare_quant.cli generate-signals --strategy momentum_rotation
 python -m ashare_quant.cli queue-orders
 ```
 
-AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 4）并发拉取日线，全市场增量更新从原先串行的数小时缩短到约二三十分钟；数据源频繁报错/限流时可把该值调到 1~2（1=串行）。Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。若使用 Tushare 第三方付费代理，可在 `.env` 设置 `TUSHARE_API_URL`（留空则走官方 `api.tushare.pro`；代理到期接口报错时系统自动退回 AkShare 主源）。生产环境应先用少量代码测试：
+AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 2）并发拉取日线；数据源频繁报错/限流时可把该值调到 1（串行）。为避免限流导致「当日数据大面积缺失」，系统内置两道保障：① **整批重试**——单轮失败标的占比超过 `data.update_retry_failure_ratio`（默认 30%）时，自动降并发到 1 对失败标的补拉一轮；② **盘后完整性闸门**——盘后流程（`after_close`）在买点扫描与信号生成前检查「最新交易日日线覆盖率」，低于 `data.min_daily_coverage`（默认 80%）时跳过推送并改发「盘后流程推迟」告警，避免用过期收盘价误报。Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。若使用 Tushare 第三方付费代理，可在 `.env` 设置 `TUSHARE_API_URL`（留空则走官方 `api.tushare.pro`；代理到期接口报错时系统自动退回 AkShare 主源）。生产环境应先用少量代码测试：
 
 ```powershell
 python -m ashare_quant.cli update-data --codes 600000,600036,510300
