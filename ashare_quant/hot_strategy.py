@@ -98,11 +98,14 @@ def ensure_industry_mapping(database: Any, data_service: Any, min_coverage: floa
 
 def _load_panels(database: Any, universe: list[dict[str, Any]], lookback_start: str, end_date: str) -> dict[str, pd.DataFrame]:
     """按代码批量取日线并转成 date×code 宽表。"""
-    # 数据库 trade_date 存的是 YYYYMMDD（无连字符），而调用方传 YYYY-MM-DD；
+    # trade_date 有两种格式：hist 库为 YYYYMMDD（无连字符），默认演示/模拟盘库为 YYYY-MM-DD（带连字符）。
     # 字符串比较混用两种格式会导致 end_date 所在年份的数据被整体误滤（"20260102" > "2026-08-28"）。
-    # 这里统一转为无连字符格式再查询。
-    lookback_start = str(lookback_start).replace("-", "")
-    end_date = str(end_date).replace("-", "")
+    # 这里先探测库里实际格式，再把查询参数对齐到同一格式。
+    sample = database.query_one("SELECT trade_date FROM daily_bars LIMIT 1")
+    has_dash = bool(sample and sample.get("trade_date") and "-" in str(sample["trade_date"]))
+    if not has_dash:
+        lookback_start = str(lookback_start).replace("-", "")
+        end_date = str(end_date).replace("-", "")
     frames: list[pd.DataFrame] = []
     chunk_size = 500
     for i in range(0, len(universe), chunk_size):

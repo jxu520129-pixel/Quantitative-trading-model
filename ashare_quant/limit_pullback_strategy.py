@@ -210,6 +210,99 @@ def _scan_entry_signals(
     return signals
 
 
+def scan_limit_pullback_signals(
+    database: Any,
+    end_date: str | None = None,
+    min_limit_up: int = 50,
+    sig2_vol_ratio: float = 2.0,
+    sig2_gain_pct: float = 0.02,
+    sig1_shrink: float = 0.4,
+    min_surge: float = 1.05,
+) -> list[dict[str, Any]]:
+    """扫描最新交易日涨停回马枪买入信号（供模拟盘 lab_signal 引擎复用）。
+
+    与 :func:`run_limit_pullback_backtest` 同源复用形态检测与打分，但只返回
+    「最新交易日」的买入信号（含 code/name/score/h_high/pullback/streak），
+    不涉及资金与持仓管理。大盘闸门仅保留「前日涨停家数 ≥ min_limit_up」一项，
+    弱势时返回空列表。
+    """
+    end_date = end_date or datetime.now().strftime("%Y-%m-%d")
+    industry_rows = database.query_all("SELECT code,industry FROM stock_industry")
+    industry_map = {r["code"]: r["industry"] for r in industry_rows}
+
+    universe = [
+        item for item in database.query_all(
+            "SELECT code,name FROM stock_basic WHERE security_type='STOCK' AND is_st=0 AND is_delisted=0"
+        )
+        if item["code"].startswith(_MAIN_BOARD_PREFIXES)
+    ]
+    if not universe:
+        return []
+    name_map = {item["code"]: item["name"] for item in universe}
+    lookback_start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
+    panels = _load_panels(database, universe, lookback_start, end_date)
+    if not panels:
+        return []
+    close = panels["close"]
+
+    # 行业当日涨幅排名（板块热度打分用，等权均值近似板块涨幅）
+    pct = close / close.shift(1) - 1
+    sectors = sorted({v for v in industry_map.values() if v})
+    industry_rank = pd.DataFrame(index=close.index)
+    if sectors:
+        ind_pos = {name: i for i, name in enumerate(sectors)}
+        onehot = np.zeros((len(close.columns), len(sectors)), dtype=np.float32)
+        for j, code in enumerate(close.columns):
+            pos_ = ind_pos.get(industry_map.get(code, ""))
+            if pos_ is not None:
+                onehot[j, pos_] = 1.0
+        den = pct.notna().astype(np.float32).to_numpy() @ onehot
+        num = pct.fillna(0.0).to_numpy(dtype=np.float32) @ onehot
+        ind_mean = pd.DataFrame(np.where(den > 0, num / np.maximum(den, 1e-9), np.nan), index=close.index, columns=sectors)
+        industry_rank = ind_mean.rank(axis=1, ascending=False)
+
+    # 大盘闸门：前日涨停家数（沪深全市场口径）
+    sentiment_universe = [
+        item for item in database.query_all(
+            "SELECT code FROM stock_basic WHERE security_type='STOCK' AND is_st=0 AND is_delisted=0"
+        )
+        if not item["code"].startswith(("43", "83", "87", "88", "920"))
+    ]
+    sent_close = _load_panels(database, sentiment_universe, lookback_start, end_date).get("close")
+    if sent_close is None or sent_close.empty:
+        sent_close = close
+    sent_pre = sent_close.shift(1)
+    sent_limit_pct = pd.Series({code: board_price_limit(code, is_st=False) for code in sent_close.columns})
+    limit_up_n = (sent_close >= (sent_pre * (1 + sent_limit_pct)).round(2) - 1e-6).sum(axis=1)
+
+    events = _detect_pullback_events(panels, min_surge)
+    signals = _scan_entry_signals(panels, events, industry_map, industry_rank, sig2_vol_ratio, sig2_gain_pct, sig1_shrink)
+    if not signals:
+        return []
+
+    # 取最新交易日，并应用大盘闸门（用前一日涨停家数）
+    latest_date = max(signals.keys())
+    prev_limit_up = 0
+    if latest_date in sent_close.index:
+        pos = sent_close.index.get_loc(latest_date)
+        if pos > 0:
+            prev_limit_up = int(limit_up_n.iloc[pos - 1])
+    if prev_limit_up < min_limit_up:
+        return []
+
+    result: list[dict[str, Any]] = []
+    for sig in signals[latest_date]:
+        result.append({
+            "code": sig["code"],
+            "name": name_map.get(sig["code"], sig["code"]),
+            "score": sig["score"],
+            "h_high": sig["h_high"],
+            "pullback": sig["pullback"],
+            "streak": sig["streak"],
+        })
+    return result
+
+
 def run_limit_pullback_backtest(
     database: Any,
     data_service: Any,

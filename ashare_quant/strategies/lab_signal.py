@@ -40,6 +40,11 @@ class LabSignalStrategy(BaseStrategy):
                 entry = json.loads(strat["entry_json"])
             except (ValueError, TypeError):
                 continue
+            engine = str(entry.get("engine", "")).strip()
+            if engine:
+                # engine 类策略（涨停回马枪 / 人气热度）：内置引擎打分，单独处理
+                self._rank_engine_signals(engine, entry, str(strat["name"]), ranked)
+                continue
             conditions = entry.get("conditions", [])
             if not conditions:
                 continue
@@ -84,3 +89,23 @@ class LabSignalStrategy(BaseStrategy):
 
         ranked.sort(key=lambda item: item[1], reverse=True)
         return self.rebalance_signals(context, ranked)
+
+    def _rank_engine_signals(
+        self, engine: str, entry: dict, name: str, ranked: list[tuple[str, float, str]]
+    ) -> None:
+        """处理 engine 类策略（内置引擎打分），把命中信号并入统一排序列表。
+
+        涨停回马枪：复用 :func:`scan_limit_pullback_signals` 扫描最新交易日信号，
+        命中（score ≥ threshold）的信号按 ``(score - threshold) / 10`` 归一化到
+        与条件类 z-score 可比的量纲（约 0~3），正分越高越优先。
+        """
+        if engine == "limit_pullback_score":
+            from ..limit_pullback_strategy import scan_limit_pullback_signals
+
+            threshold = float(entry.get("threshold", 70.0))
+            signals = scan_limit_pullback_signals(self.database)
+            for sig in signals:
+                if sig["score"] >= threshold:
+                    strength = (sig["score"] - threshold) / 10.0
+                    ranked.append((sig["code"], strength, f"命中「{name}」"))
+        # engine == "hot_score"（人气热度）暂不接入模拟盘；如需接入再补充
