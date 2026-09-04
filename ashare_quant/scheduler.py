@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from . import ml_model
 from .fundamental import update_fundamentals
 from .lab import build_buy_report, fetch_scan_quotes
-from .main_rally import generate_main_rally_report
+from .main_rally import generate_daily_events_report, generate_main_rally_report
 from .services.runtime import Runtime, build_runtime
 from .utils import today_text
 
@@ -118,10 +118,15 @@ def pre_market_scan(runtime: Runtime) -> None:
         quotes = {}
     # 形成盘前候选池 + 生成富文本报告（纯文本 + HTML）
     has_candidates, report, html = generate_main_rally_report(runtime, current_quotes=quotes)
-    if not has_candidates:
+    if has_candidates:
+        runtime.notifications.send("盘前主升浪扫描", report, "INFO", html=html)
+        LOG.info("盘前主升浪扫描：%s", report.replace("\n", " / "))
         return
-    runtime.notifications.send("盘前主升浪扫描", report, "INFO", html=html)
-    LOG.info("盘前主升浪扫描：%s", report.replace("\n", " / "))
+    # 无主升浪候选时，退而发「今日重要事件」，保证每天盘前都有当日要闻可看
+    has_events, ev_text, ev_html = generate_daily_events_report(runtime)
+    if has_events:
+        runtime.notifications.send("今日重要事件", ev_text, "INFO", html=ev_html)
+        LOG.info("盘前今日重要事件：%s", ev_text.replace("\n", " / "))
 
 
 def _parse_hhmm(value: str) -> tuple[int, int]:

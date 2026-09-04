@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import html as _html
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
 
 from .database import Database
 from .event_similarity import format_similarity_section_html, similar_event_review
-from .industry_chain import INDUSTRY_CHAIN
+from .industry_chain import INDUSTRY_CHAIN, affected_industries
 from .ml_model import model_info, predict_main_rally_probability
 
 
@@ -254,7 +255,146 @@ def get_industry_events(database: Database, industry: str) -> list[dict[str, Any
     return matched
 
 
-def get_stage(technical: float) -> str:
+# 事件方向 -> 展示颜色（A 股涨红跌绿）
+_DIR_COLOR = {"正": "#c0392b", "负": "#1e8449", "中性": "#7f8c8d"}
+
+
+def top_events_today(database: Database, limit: int = 15) -> list[dict[str, Any]]:
+    """当日重要事件（按重要性 magnitude 降序，同强度按时间倒序）。
+
+    ``event_time`` 存的是北京时间字符串（YYYY-MM-DD HH:MM:SS），用北京时间判断
+    「当日」；当日无事件时回退到最近入库的事件，保证盘前报告不空。
+    """
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    fields = "title, summary, event_time, event_type, magnitude, causal_direction, affected_industries, persistence"
+    events = database.query_all(
+        f"SELECT {fields} FROM events WHERE event_time LIKE ? ORDER BY magnitude DESC, event_time DESC LIMIT ?",
+        (f"{today}%", limit),
+    )
+    if not events:
+        events = database.query_all(
+            f"SELECT {fields} FROM events ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+    return events
+
+
+def match_event_candidates(
+    event: dict[str, Any], candidates: list[dict[str, Any]], limit: int = 5
+) -> list[dict[str, Any]]:
+    """找出与某事件相关的候选股票（按综合评分降序）。
+
+    匹配依据：把事件标题 + affected_industries 合并成文本，用产业链关键词映射到
+    标准行业（含上下游），候选股票所属行业命中即匹配。
+    """
+    affected = {a.strip() for a in (event.get("affected_industries") or "").split(",") if a.strip()}
+    title = event.get("title") or ""
+    event_text = title + " " + " ".join(affected)
+    # 标准行业（含上下游）+ 直接把 LLM 给出的 affected_industries 也当作命中关键词
+    hit_industries = set(affected_industries(event_text)) | affected
+    matched: list[dict[str, Any]] = []
+    for c in candidates:
+        industry = c.get("industry") or ""
+        chains = [name for name in INDUSTRY_CHAIN if name in industry]
+        if any(chain in hit_industries for chain in chains):
+            matched.append(c)
+    matched.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+    return matched[:limit]
+
+
+def _event_stars(magnitude: Any) -> str:
+    mag = max(1, min(5, int(magnitude or 1)))
+    return "★" * mag + "☆" * (5 - mag)
+
+
+def format_daily_events_html(
+    database: Database,
+    candidates: list[dict[str, Any]],
+    limit: int = 12,
+    standalone: bool = False,
+) -> str:
+    """生成「今日重要事件」HTML 板块：按重要性排序，每个事件下列关联候选股票。
+
+    ``standalone=True`` 时带完整容器（用于无主升浪候选时单独发「今日重要事件」邮件）；
+    否则只返回板块片段（嵌入主升浪报告的头部）。
+    """
+    esc = _html.escape
+    events = top_events_today(database, limit=limit)
+    if not events:
+        return ""
+
+    parts: list[str] = []
+    parts.append(
+        '<h4 style="margin:18px 0 6px;padding-left:9px;border-left:4px solid #e74c3c;font-size:15px;color:#2c3e50;">'
+        f'📰 今日重要事件 Top {len(events)}（按重要性排序）</h4>'
+    )
+    parts.append(
+        '<p style="margin:2px 0 8px;font-size:12px;color:#888;">'
+        '只展示当日最新消息，★ 越多越重要；每条的「关联标的」是命中该事件行业的候选股票。</p>'
+    )
+    for i, ev in enumerate(events, 1):
+        mag = int(ev.get("magnitude") or 1)
+        direction = str(ev.get("causal_direction") or "中性")
+        color = _DIR_COLOR.get(direction, "#7f8c8d")
+        stocks = match_event_candidates(ev, candidates)
+        parts.append(
+            '<div style="border:1px solid #e8ecef;border-left:3px solid #e74c3c;border-radius:6px;'
+            'padding:8px 12px;margin:8px 0;background:#fbfcfd;">'
+        )
+        parts.append(
+            f'<div style="font-size:13.5px;color:#2c3e50;"><b>{i}. {esc(str(ev.get("title") or ""))}</b></div>'
+        )
+        parts.append(
+            f'<div style="font-size:12px;color:#888;margin:3px 0;">'
+            f'<span style="color:#e67e22;">{_event_stars(mag)}</span>　'
+            f'<span style="color:{color};font-weight:600;">{esc(direction)}</span>　'
+            f'{esc(str(ev.get("event_type") or "其他"))}　'
+            f'持续性 {esc(str(ev.get("persistence") or "短期"))}　'
+            f'{esc(str(ev.get("event_time") or "")[:16])}</div>'
+        )
+        if stocks:
+            stock_str = "　".join(
+                f'<span style="white-space:nowrap;">{esc(str(s["name"]))}({s["code"]}) '
+                f'¥{float(s.get("price") or 0):.2f}　评分<b style="color:#e67e22;">{float(s.get("score") or 0):.0f}</b></span>'
+                for s in stocks
+            )
+            parts.append(f'<div style="font-size:12.5px;color:#333;">关联标的：{stock_str}</div>')
+        else:
+            parts.append('<div style="font-size:12px;color:#b0b6bd;">关联标的：当日候选池无直接匹配</div>')
+        parts.append('</div>')
+
+    if not standalone:
+        return "".join(parts)
+
+    header = (
+        '<div style="font-family:Microsoft YaHei,Arial,sans-serif;max-width:860px;">'
+        '<div style="background:#34495e;color:#fff;padding:12px 16px;border-radius:6px;">'
+        f'<h3 style="margin:0;font-size:17px;">A股今日重要事件 · {datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")}</h3>'
+        '<p style="margin:5px 0 0;font-size:13px;opacity:.92;">当日财经要闻按重要性排序，附命中行业的候选标的。</p>'
+        '</div>'
+    )
+    footer = (
+        '<p style="margin:16px 0 0;color:#999;font-size:12px;">'
+        '事件重要性与方向由关键词/模型近似判断，仅供参考；系统自动扫描，不构成投资建议。</p>'
+        '</div>'
+    )
+    return header + "".join(parts) + footer
+
+
+def generate_daily_events_report(runtime: Any, limit: int = 12) -> tuple[bool, str, str]:
+    """生成独立「今日重要事件」报告，返回 (是否有内容, 纯文本, HTML)。
+
+    用于盘前无主升浪候选时兜底推送，保证用户每天早上仍能收到当日要闻。
+    """
+    events = top_events_today(runtime.database, limit=limit)
+    if not events:
+        return False, "", ""
+    text_lines = ["A股今日重要事件 Top " + str(len(events)), "=" * 40]
+    for i, ev in enumerate(events, 1):
+        text_lines.append(
+            f"{i}. [{ev['event_type']}|强度{ev['magnitude']}|{ev['causal_direction']}] {ev['title']}"
+        )
+    html = format_daily_events_html(runtime.database, [], limit=limit, standalone=True)
+    return True, "\n".join(text_lines), html
     if technical >= 80:
         return "主升 → 加速"
     if technical >= 60:
@@ -416,6 +556,10 @@ def format_main_rally_report_html(database: Database, results: list[dict[str, An
                  f'/ 盈利{WEIGHTS["earnings"]:.0%} / 技术{WEIGHTS["technical"]:.0%}</p>')
     parts.append(f'<p style="margin:5px 0 0;font-size:12px;opacity:.75;">P(主升)模型：{esc(model_info(settings) if settings else "未训练（使用评分近似）")}</p>')
     parts.append('</div>')
+
+    daily_events = format_daily_events_html(database, results, limit=12)
+    if daily_events:
+        parts.append(daily_events)
 
     parts.append('<h4 style="margin:18px 0 4px;padding-left:9px;border-left:4px solid #e67e22;font-size:15px;color:#2c3e50;">'
                  f'一、主升浪候选 Top {min(top_n, len(results))}（按综合评分，完整样例卡片）</h4>')
