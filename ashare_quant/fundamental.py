@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import requests
@@ -87,39 +88,77 @@ def event_direction(text: str) -> str:
     return "中性"
 
 
-def llm_extract_events(events: list[dict[str, str]]) -> dict[int, dict[str, Any]]:
-    """批量调用 LLM 结构化抽取事件字段，返回 {index: {...}}。无 key 或失败返回空。"""
+def _strip_json(content: str) -> str:
+    """去除 LLM 可能包裹的 markdown 代码块（```json ... ```）。"""
+    content = (content or "").strip()
+    if content.startswith("```"):
+        content = content.lstrip("`")
+        if content.startswith("json"):
+            content = content[4:]
+        content = content.rstrip("`").strip()
+    return content
+
+
+def _llm_call_once(api_key: str, base_url: str, model: str, prompt: str, retries: int = 3) -> dict[int, dict[str, Any]]:
+    """单次 LLM 抽取调用（带重试与 JSON 清洗），返回 {index: {...}}。失败返回空。"""
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                      "response_format": {"type": "json_object"}, "temperature": 0},
+                timeout=90,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            data = json.loads(_strip_json(content))
+            batch_result: dict[int, dict[str, Any]] = {}
+            for item in data.get("results", []):
+                try:
+                    idx = int(item.get("index", -1))
+                except (TypeError, ValueError):
+                    continue
+                if idx >= 0:
+                    batch_result[idx] = item
+            return batch_result
+        except Exception as error:
+            if attempt == retries:
+                LOG.warning("LLM 抽取失败（已重试 %s 次），该批回退关键词：%s", retries, error)
+                return {}
+            time.sleep(1.5 * attempt)
+    return {}
+
+
+def llm_extract_events(events: list[dict[str, str]], batch_size: int = 30) -> dict[int, dict[str, Any]]:
+    """分批调用 LLM 结构化抽取事件字段，返回 {index: {...}}。无 key 或失败返回空。
+
+    每条事件抽取：event_type / magnitude（1-5）/ causal_direction / persistence。
+    注意：affected_industries 不在这里抽取（统一由关键词函数映射到标准行业，见
+    ``fetch_global_events``），避免 LLM 自由文本与标准行业表不一致。
+    """
     api_key = os.getenv("LLM_API_KEY", "")
     base_url = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
     model = os.getenv("LLM_MODEL", "deepseek-chat")
     if not api_key or not events:
+        if events:
+            LOG.warning("未配置 LLM_API_KEY，事件抽取回退关键词分类")
         return {}
-    lines = [f"{i}. 标题：{ev['title']} 摘要：{ev['summary'][:80]}" for i, ev in enumerate(events)]
-    prompt = (
-        "你是A股事件分析助手。对下面每条新闻提取：event_type（政策/金融/科技/能源/资源/农业/医药/消费/地产基建/产业/战争/自然灾害/其他）、"
-        "magnitude（1-5整数，重要性）、causal_direction（正/负/中性）、"
-        "affected_industries（受影响行业关键词数组，可为空）、persistence（短期/中期/长期）。\n"
-        "只返回JSON对象，格式：{\"results\":[{\"index\":0,\"event_type\":\"科技\",\"magnitude\":4,\"causal_direction\":\"正\",\"affected_industries\":[\"半导体\"],\"persistence\":\"中期\"},...]}\n\n"
-        + "\n".join(lines)
-    )
-    try:
-        resp = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": [{"role": "user", "content": prompt}],
-                  "response_format": {"type": "json_object"}, "temperature": 0},
-            timeout=90,
+
+    result: dict[int, dict[str, Any]] = {}
+    started = time.time()
+    for batch_start in range(0, len(events), batch_size):
+        batch = events[batch_start:batch_start + batch_size]
+        lines = [f"{i}. 标题：{ev['title']} 摘要：{ev['summary'][:80]}" for i, ev in enumerate(batch, start=batch_start)]
+        prompt = (
+            "你是A股事件分析助手。对下面每条新闻提取：event_type（政策/金融/科技/能源/资源/农业/医药/消费/地产基建/产业/战争/自然灾害/其他）、"
+            "magnitude（1-5整数，重要性）、causal_direction（正/负/中性）、persistence（短期/中期/长期）。\n"
+            "只返回JSON对象，格式：{\"results\":[{\"index\":0,\"event_type\":\"科技\",\"magnitude\":4,\"causal_direction\":\"正\",\"persistence\":\"中期\"},...]}\n\n"
+            + "\n".join(lines)
         )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        data = json.loads(content)
-        result: dict[int, dict[str, Any]] = {}
-        for item in data.get("results", []):
-            result[int(item.get("index", -1))] = item
-        return result
-    except Exception as error:
-        LOG.warning("LLM 事件抽取失败，回退关键词：%s", error)
-        return {}
+        result.update(_llm_call_once(api_key, base_url, model, prompt))
+    LOG.info("LLM 事件抽取完成：%s/%s 条成功，耗时 %.1fs", len(result), len(events), time.time() - started)
+    return result
 
 
 def _num(value: Any) -> float:
@@ -154,21 +193,23 @@ def fetch_global_events(database: Database, limit: int = 200) -> int:
     for i, item in enumerate(items):
         title = item["title"]
         summary = item["summary"]
+        # event_time 为事件发布时间（北京时间，AkShare 返回）；created_at 为入库时间（UTC）。
+        # 「当日」判断必须用 event_time，勿用 created_at（两者差 8 小时）。
         event_time = item["event_time"]
         text = title + " " + summary
         event_id = hashlib.md5(f"{title}|{event_time}".encode("utf-8")).hexdigest()
+        # 受影响行业统一用关键词函数映射到标准行业（含上下游），不依赖 LLM 自由文本
+        industries = ",".join(affected_industries(text))
         if i in llm_results:
             r = llm_results[i]
-            event_type = str(r.get("event_type") or "其他")
-            magnitude = int(r.get("magnitude") or event_magnitude(text))
-            direction = str(r.get("causal_direction") or "中性")
-            industries = ",".join(r.get("affected_industries") or []) or ",".join(affected_industries(text))
-            persistence = str(r.get("persistence") or "短期")
+            event_type = str(r.get("event_type") or classify_event(text))
+            magnitude = max(1, min(5, int(_num(r.get("magnitude")) or event_magnitude(text))))
+            direction = str(r.get("causal_direction") or event_direction(text))
+            persistence = str(r.get("persistence") or ("中期" if magnitude >= 3 else "短期"))
         else:
             event_type = classify_event(text)
             magnitude = event_magnitude(text)
             direction = event_direction(text)
-            industries = ",".join(affected_industries(text))
             persistence = "中期" if magnitude >= 3 else "短期"
         rows.append((event_id, title, summary[:200], event_time, event_type, "全球财经快讯", "B", magnitude, direction, industries, persistence, now))
     if rows:

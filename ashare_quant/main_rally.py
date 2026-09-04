@@ -312,36 +312,37 @@ def format_daily_events_html(
     limit: int = 12,
     standalone: bool = False,
 ) -> str:
-    """生成「今日重要事件」HTML 板块：按重要性排序，每个事件下列关联候选股票。
+    """生成「今日重要事件」HTML：核心机会 + 利空风险提醒，每个事件关联核心候选股票。
+
+    只展示当日最新且重要性 ≥3 的核心消息；按方向拆成「核心机会（正/中性）」与
+    「风险提醒（负面/利空）」两个区，每条的关联标的只保留评分最高的核心股票。
 
     ``standalone=True`` 时带完整容器（用于无主升浪候选时单独发「今日重要事件」邮件）；
     否则只返回板块片段（嵌入主升浪报告的头部）。
     """
     esc = _html.escape
-    events = top_events_today(database, limit=limit)
+    events = top_events_today(database, limit=limit * 3)
     if not events:
         return ""
 
-    parts: list[str] = []
-    parts.append(
-        '<h4 style="margin:18px 0 6px;padding-left:9px;border-left:4px solid #e74c3c;font-size:15px;color:#2c3e50;">'
-        f'📰 今日重要事件 Top {len(events)}（按重要性排序）</h4>'
-    )
-    parts.append(
-        '<p style="margin:2px 0 8px;font-size:12px;color:#888;">'
-        '只展示当日最新消息，★ 越多越重要；每条的「关联标的」是命中该事件行业的候选股票。</p>'
-    )
-    for i, ev in enumerate(events, 1):
+    # 核心事件：当日 + 重要性 ≥3
+    core = [e for e in events if int(e.get("magnitude") or 1) >= 3]
+    if not core:
+        core = events[:limit]
+    opportunities = [e for e in core if str(e.get("causal_direction") or "") != "负"]
+    risks = [e for e in core if str(e.get("causal_direction") or "") == "负"]
+
+    def _event_card(idx: int, ev: dict[str, Any], border_color: str) -> None:
         mag = int(ev.get("magnitude") or 1)
         direction = str(ev.get("causal_direction") or "中性")
         color = _DIR_COLOR.get(direction, "#7f8c8d")
-        stocks = match_event_candidates(ev, candidates)
+        stocks = match_event_candidates(ev, candidates, limit=3)
         parts.append(
-            '<div style="border:1px solid #e8ecef;border-left:3px solid #e74c3c;border-radius:6px;'
+            f'<div style="border:1px solid #e8ecef;border-left:3px solid {border_color};border-radius:6px;'
             'padding:8px 12px;margin:8px 0;background:#fbfcfd;">'
         )
         parts.append(
-            f'<div style="font-size:13.5px;color:#2c3e50;"><b>{i}. {esc(str(ev.get("title") or ""))}</b></div>'
+            f'<div style="font-size:13.5px;color:#2c3e50;"><b>{idx}. {esc(str(ev.get("title") or ""))}</b></div>'
         )
         parts.append(
             f'<div style="font-size:12px;color:#888;margin:3px 0;">'
@@ -357,10 +358,39 @@ def format_daily_events_html(
                 f'¥{float(s.get("price") or 0):.2f}　评分<b style="color:#e67e22;">{float(s.get("score") or 0):.0f}</b></span>'
                 for s in stocks
             )
-            parts.append(f'<div style="font-size:12.5px;color:#333;">关联标的：{stock_str}</div>')
+            parts.append(f'<div style="font-size:12.5px;color:#333;">关联核心标的：{stock_str}</div>')
         else:
-            parts.append('<div style="font-size:12px;color:#b0b6bd;">关联标的：当日候选池无直接匹配</div>')
+            parts.append('<div style="font-size:12px;color:#b0b6bd;">关联核心标的：当日候选池无直接匹配</div>')
         parts.append('</div>')
+
+    parts: list[str] = []
+    # 一、核心机会（正/中性）
+    parts.append(
+        '<h4 style="margin:18px 0 6px;padding-left:9px;border-left:4px solid #e74c3c;font-size:15px;color:#2c3e50;">'
+        f'📰 今日核心事件 Top {len(opportunities)}（按重要性排序）</h4>'
+    )
+    parts.append(
+        '<p style="margin:2px 0 8px;font-size:12px;color:#888;">'
+        '只展示当日最新、重要性≥3 的核心消息；★ 越多越重要；每条关联评分最高的核心候选股票。</p>'
+    )
+    if opportunities:
+        for i, ev in enumerate(opportunities[:limit], 1):
+            _event_card(i, ev, "#e74c3c")
+    else:
+        parts.append('<p style="font-size:12.5px;color:#888;">今日无正向核心事件。</p>')
+
+    # 二、风险提醒（负面/利空）
+    if risks:
+        parts.append(
+            '<h4 style="margin:20px 0 6px;padding-left:9px;border-left:4px solid #1e8449;font-size:15px;color:#2c3e50;">'
+            f'⚠️ 风险提醒（利空 / 宏观风险，{len(risks)} 条）</h4>'
+        )
+        parts.append(
+            '<p style="margin:2px 0 8px;font-size:12px;color:#888;">'
+            '当日负面事件，可能对相关板块或大盘构成压制，注意规避。</p>'
+        )
+        for i, ev in enumerate(risks[:6], 1):
+            _event_card(i, ev, "#1e8449")
 
     if not standalone:
         return "".join(parts)
@@ -369,7 +399,7 @@ def format_daily_events_html(
         '<div style="font-family:Microsoft YaHei,Arial,sans-serif;max-width:860px;">'
         '<div style="background:#34495e;color:#fff;padding:12px 16px;border-radius:6px;">'
         f'<h3 style="margin:0;font-size:17px;">A股今日重要事件 · {datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")}</h3>'
-        '<p style="margin:5px 0 0;font-size:13px;opacity:.92;">当日财经要闻按重要性排序，附命中行业的候选标的。</p>'
+        '<p style="margin:5px 0 0;font-size:13px;opacity:.92;">当日核心要闻按重要性排序（含利空风险提醒），附命中行业的核心候选标的。</p>'
         '</div>'
     )
     footer = (
@@ -385,16 +415,26 @@ def generate_daily_events_report(runtime: Any, limit: int = 12) -> tuple[bool, s
 
     用于盘前无主升浪候选时兜底推送，保证用户每天早上仍能收到当日要闻。
     """
-    events = top_events_today(runtime.database, limit=limit)
+    events = top_events_today(runtime.database, limit=limit * 3)
     if not events:
         return False, "", ""
-    text_lines = ["A股今日重要事件 Top " + str(len(events)), "=" * 40]
-    for i, ev in enumerate(events, 1):
-        text_lines.append(
-            f"{i}. [{ev['event_type']}|强度{ev['magnitude']}|{ev['causal_direction']}] {ev['title']}"
-        )
+    core = [e for e in events if int(e.get("magnitude") or 1) >= 3] or events[:limit]
+    opportunities = [e for e in core if str(e.get("causal_direction") or "") != "负"]
+    risks = [e for e in core if str(e.get("causal_direction") or "") == "负"]
+    text_lines = [f"A股今日重要事件 · 核心机会 {len(opportunities)} / 利空风险 {len(risks)}", "=" * 40]
+    text_lines.append("【核心机会】")
+    for i, ev in enumerate(opportunities[:limit], 1):
+        text_lines.append(f"{i}. [{ev['event_type']}|强度{ev['magnitude']}|{ev['causal_direction']}] {ev['title']}")
+    if risks:
+        text_lines.append("")
+        text_lines.append("【风险提醒·利空】")
+        for i, ev in enumerate(risks[:6], 1):
+            text_lines.append(f"{i}. [{ev['event_type']}|强度{ev['magnitude']}|{ev['causal_direction']}] {ev['title']}")
     html = format_daily_events_html(runtime.database, [], limit=limit, standalone=True)
     return True, "\n".join(text_lines), html
+
+
+def get_stage(technical: float) -> str:
     if technical >= 80:
         return "主升 → 加速"
     if technical >= 60:
