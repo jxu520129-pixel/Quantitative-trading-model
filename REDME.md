@@ -78,7 +78,7 @@ streamlit run dashboard.py
 
 ## 获取真实行情
 
-首次运行会拉取沪深 A 股与 ETF 基础信息，并尽力获取沪深 300 成分。策略候选池为沪深 300 成分股加 ETF（由 `universe_members` 表强制执行；成分数据缺失时退化为全部 A 股）；ST、退市和停牌标记会被过滤，科创板、创业板、北交所和可转债不会进入 V1 候选池。
+首次运行会拉取沪深 A 股与 ETF 基础信息。策略候选池默认**全市场选股**（`stock_universe_index` 留空 = 全部 A 股 + ETF；填指数代码如 `000300` 则限定为该指数成分股 + ETF）；ST、退市和停牌标记会被过滤，科创板、创业板、北交所和可转债不会进入 V1 候选池。
 
 ```powershell
 python -m ashare_quant.cli update-data
@@ -86,11 +86,13 @@ python -m ashare_quant.cli generate-signals --strategy momentum_rotation
 python -m ashare_quant.cli queue-orders
 ```
 
-AkShare 接口受上游站点和网络状态影响。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 2）并发拉取日线；数据源频繁报错/限流时可把该值调到 1（串行）。为避免限流导致「当日数据大面积缺失」，系统内置两道保障：① **整批重试**——单轮失败标的占比超过 `data.update_retry_failure_ratio`（默认 30%）时，自动降并发到 1 对失败标的补拉一轮；② **盘后完整性闸门**——盘后流程（`after_close`）在买点扫描与信号生成前检查「最新交易日日线覆盖率」，低于 `data.min_daily_coverage`（默认 80%）时跳过推送并改发「盘后流程推迟」告警，避免用过期收盘价误报。Tushare Token 存在时用于日线回退，但低积分账号仍可能被限流。若使用 Tushare 第三方付费代理，可在 `.env` 设置 `TUSHARE_API_URL`（留空则走官方 `api.tushare.pro`；代理到期接口报错时系统自动退回 AkShare 主源）。生产环境应先用少量代码测试：
+历史日线**主数据源为 Tushare**（付费代理更稳定，`.env` 配 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL`，留空走官方 `api.tushare.pro`），**备用源为 AkShare**（依赖免费新浪接口，高频拉取易被 SSL 重置/封禁，故仅作回退）；未配置 Tushare Token 时自动退回 AkShare。**实时行情（盘中买点扫描、盘前集合竞价）固定用 AkShare 拉取**——Tushare 不提供实时行情，系统每次仅 1 次请求拉全市场快照、每天约 6 次，低频不触发封禁。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 2）并发拉取日线；数据源频繁报错/限流时可把该值调到 1（串行）。为避免限流导致「当日数据大面积缺失」，系统内置两道保障：① **整批重试**——单轮失败标的占比超过 `data.update_retry_failure_ratio`（默认 30%）时，自动降并发到 1 对失败标的补拉一轮；② **盘后完整性闸门**——盘后流程（`after_close`）在买点扫描与信号生成前检查「最新交易日日线覆盖率」，低于 `data.min_daily_coverage`（默认 80%）时跳过推送并改发「盘后流程推迟」告警，避免用过期收盘价误报。生产环境应先用少量代码测试：
 
 ```powershell
 python -m ashare_quant.cli update-data --codes 600000,600036,510300
 ```
+
+> **全市场性能说明**：候选池扩展为全市场（约 5000+ 只）后，SQLite 历史库达 1GB+。为控制扫描/查询耗时，系统做了三处针对性优化：① `load_bars_many` 去掉冗余 `ORDER BY`（主键 `(code, trade_date)` 索引已保证有序，此前全量排序慢约 8 倍）；② 数据库连接加大页缓存（`PRAGMA cache_size` 50MB），缓解大库读盘；③ 买点扫描与信号生成只加载最近 260 个交易日（`DataService.lookback_start`，52 周新高因子够用），全市场日线加载从约 4 分钟降到 15 秒内。
 
 ## 日线运行时序
 
