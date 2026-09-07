@@ -250,8 +250,13 @@ class DataService:
         return self.database.query_one("SELECT * FROM daily_bars WHERE code=? ORDER BY trade_date DESC LIMIT 1", (code,))
 
     def refresh_quotes(self, codes: list[str]) -> int:
-        """拉取给定标的的实时快照并写入 market_quotes 表（供模拟成交与盘中扫描使用）。"""
-        frame = self.primary.realtime_quotes(codes)
+        """拉取给定标的的实时快照并写入 market_quotes 表（供模拟成交与盘中扫描使用）。
+
+        实时行情仅 akshare（新浪）支持，tushare 主源不支持（会抛 NotImplementedError），
+        故优先用备用源（akshare）；无备用源时退回主源。
+        """
+        provider = self.fallback if self.fallback is not None else self.primary
+        frame = provider.realtime_quotes(codes)
         if frame.empty:
             return 0
         now = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -263,7 +268,7 @@ class DataService:
             rows.append((
                 str(item["code"]).zfill(6), now, float(price),
                 None if pd.isna(item.get("pre_close")) else float(item.get("pre_close")),
-                float(item.get("volume", 0) or 0), self.primary.name,
+                float(item.get("volume", 0) or 0), provider.name,
             ))
         self.database.executemany(
             """INSERT INTO market_quotes(code,quote_time,price,pre_close,volume,source) VALUES(?,?,?,?,?,?)
