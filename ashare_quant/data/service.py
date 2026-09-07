@@ -226,23 +226,29 @@ class DataService:
             clauses.append("trade_date<=?")
             params.append(normalize_date(end_date))
         columns = ["trade_date", "open", "high", "low", "close", "volume", "amount", "pre_close"]
+        where_extra = (" AND " + " AND ".join(clauses)) if clauses else ""
         frames: dict[str, pd.DataFrame] = {}
-        for i in range(0, len(codes), 500):
-            chunk = codes[i:i + 500]
-            placeholders = ",".join("?" * len(chunk))
-            sql = f"SELECT code,{','.join(columns)} FROM daily_bars WHERE code IN ({placeholders})"
-            if clauses:
-                sql += " AND " + " AND ".join(clauses)
-            # 不在此处 ORDER BY：主键 (code, trade_date) 索引已保证每只股票内按日期有序，
-            # 显式 ORDER BY 会触发全量排序，767 万条数据下慢约 8 倍。
-            rows = self.database.query_all(sql, [*chunk, *params])
-            if not rows:
-                continue
-            frame = pd.DataFrame(rows)
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-            for code, sub in frame.groupby("code", sort=False):
-                sub = sub.sort_values("trade_date", kind="mergesort")
-                frames[code] = sub[columns].set_index("trade_date", drop=False)
+        # 用单个连接循环分批查询：① 避免 12 次「建连接 + PRAGMA」开销，让 50MB 页缓存跨批生效；
+        # ② pd.read_sql_query 走 pandas 的 C 层读取，跳过「sqlite3.Row → dict → DataFrame」的 Python 中间层。
+        conn = self.database.connect()
+        try:
+            for i in range(0, len(codes), 500):
+                chunk = codes[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                sql = f"SELECT code,{','.join(columns)} FROM daily_bars WHERE code IN ({placeholders}){where_extra}"
+                # 不在此处 ORDER BY：主键 (code, trade_date) 覆盖索引已保证结果按 code+日期有序，
+                # 显式 ORDER BY 会触发全量排序，767 万条数据下慢约 8 倍。
+                frame = pd.read_sql_query(sql, conn, params=[*chunk, *params])
+                if frame.empty:
+                    continue
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+                # 索引已保证有序，一次性 set_index 后按 code 分组即可，
+                # 不再逐股 sort_values + set_index（全市场 5000+ 股的 Python 循环开销可观）。
+                frame = frame.set_index("trade_date", drop=False)
+                for code, sub in frame.groupby("code", sort=False):
+                    frames[code] = sub[columns]
+        finally:
+            conn.close()
         return frames
 
     def latest_bar(self, code: str) -> dict[str, object] | None:
