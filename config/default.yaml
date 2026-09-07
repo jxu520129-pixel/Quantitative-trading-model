@@ -23,7 +23,8 @@ data:
   primary: tushare
   fallback: akshare
   include_etf: true
-  stock_universe_index: "000300"
+  # 股票池指数代码。留空 = 全市场选股（不再限定沪深300成分股）；填指数代码（如 000300）则只在该指数成分股 + ETF 中选。
+  stock_universe_index: ""
   history_start: "2020-01-01"
   max_update_symbols: 7000
   # 日线增量更新的并发拉取数：值越大越快，但过高可能触发数据源限流/封 IP。
@@ -34,7 +35,7 @@ data:
   update_retry_failure_ratio: 0.30
   # 盘后流程的数据完整性闸门：最新交易日日线覆盖率低于该阈值时，推迟买点扫描与信号生成。
   min_daily_coverage: 0.80
-  strategy_scan_symbols: 2000
+  strategy_scan_symbols: 7000
   backtest_max_symbols: 7000
 
 strategy:
