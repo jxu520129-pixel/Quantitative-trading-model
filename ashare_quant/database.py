@@ -148,6 +148,8 @@ class Database:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
+        # 加大页缓存：全市场历史库约 1GB，默认 2MB 缓存导致每次查询都读盘、看板明显变慢
+        connection.execute("PRAGMA cache_size=-50000")
         return connection
 
     def initialize(self, initial_cash: float) -> None:
