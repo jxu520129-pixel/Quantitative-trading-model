@@ -27,7 +27,9 @@ class SignalService:
         universe = self.data.eligible_universe(limit=int(self.settings.data["strategy_scan_symbols"]))
         if universe.empty:
             raise RuntimeError("可用证券池为空，请先更新数据或生成演示行情")
-        bars_by_code = self.data.load_bars_many(universe["code"].tolist(), end_date=as_of_date)
+        bars_by_code = self.data.load_bars_many(
+            universe["code"].tolist(), start_date=self.data.lookback_start(260), end_date=as_of_date
+        )
         latest_dates = [frame["trade_date"].iloc[-1].date().isoformat() for frame in bars_by_code.values()]
         if not latest_dates:
             raise RuntimeError("没有可用于生成信号的日线数据")

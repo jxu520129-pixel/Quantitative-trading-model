@@ -249,6 +249,19 @@ class DataService:
         """返回单只标的最新一根日线（无数据返回 None）。"""
         return self.database.query_one("SELECT * FROM daily_bars WHERE code=? ORDER BY trade_date DESC LIMIT 1", (code,))
 
+    def lookback_start(self, n_bars: int = 260) -> str | None:
+        """返回最近 ``n_bars`` 个交易日的最早日期（YYYY-MM-DD）。
+
+        供扫描/信号生成限制日线加载范围：因子最长窗口是 52 周新高（约 250 个交易日），
+        加载全历史（2020 至今 1600+ 天）会把全市场扫描拖慢数分钟。
+        """
+        row = self.database.query_one(
+            "SELECT trade_date FROM (SELECT DISTINCT trade_date FROM daily_bars ORDER BY trade_date DESC LIMIT ?)"
+            " ORDER BY trade_date ASC LIMIT 1",
+            (n_bars,),
+        )
+        return str(row["trade_date"]) if row else None
+
     def refresh_quotes(self, codes: list[str]) -> int:
         """拉取给定标的的实时快照并写入 market_quotes 表（供模拟成交与盘中扫描使用）。
 

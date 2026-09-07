@@ -582,8 +582,11 @@ def find_buy_candidates(
         return []
     universe = data_service.eligible_universe(limit=limit or int(data_service.settings.data["strategy_scan_symbols"]))
 
+    # 只加载最近 260 个交易日（覆盖 52 周新高等因子所需最长窗口），
+    # 全市场扫描时避免加载 2020 至今的全历史（1600+ 天）导致过慢。
+    lookback_start = data_service.lookback_start(260)
     # 预加载所有标的的日线（只加载一次，供所有策略复用），并用实时价覆盖最新 close
-    loaded = data_service.load_bars_many(universe["code"].tolist(), end_date=as_of_date)
+    loaded = data_service.load_bars_many(universe["code"].tolist(), start_date=lookback_start, end_date=as_of_date)
     bars_cache: dict[str, tuple[str, pd.DataFrame, str]] = {}
     for row in universe.itertuples(index=False):
         frame = loaded.get(row.code)
