@@ -7,7 +7,7 @@ from typing import Any
 from ..config import Settings
 from ..database import Database
 from ..market_rules import LOT_SIZE, TradingCosts, at_limit, board_price_limit, round_to_lot
-from ..models import Account, OrderRequest, OrderSide, OrderStatus, Position, utc_now_text
+from ..models import Account, OrderRequest, OrderSide, OrderStatus, Position, market_open_fill_time, utc_now_text
 from ..risk import RiskManager
 from ..utils import normalize_date
 from .base import Broker
@@ -201,7 +201,7 @@ class PaperBroker(Broker):
             conn.execute(
                 """INSERT INTO fills(order_id,code,side,quantity,price,gross_amount,commission,stamp_duty,filled_at)
                    VALUES(?,?,?,?,?,?,?,?,?)""",
-                (order["id"], order["code"], side, quantity, price, amount, commission, stamp_duty, utc_now_text()),
+                (order["id"], order["code"], side, quantity, price, amount, commission, stamp_duty, market_open_fill_time(trade_date, order["id"])),
             )
 
     def _reject(self, order: dict[str, Any], message: str) -> None:
