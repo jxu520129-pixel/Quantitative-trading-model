@@ -360,6 +360,18 @@ def run_signal_backtest(
         raise RuntimeError("没有可用于信号回测的日线数据，请先 seed-demo 或 update-data")
 
     ordered_dates = sorted(calendar)
+    # 预构建「日期 → 当天有入场信号的股票列表」（按 universe 顺序）。
+    # 逐日循环只需遍历当天有信号的股票（通常几十只），而不是每天遍历全市场 5000+ 只，
+    # 把开新仓的复杂度从 O(交易日数 × 股票数) 降到 O(总信号日数)。
+    entry_by_day: dict[pd.Timestamp, list[str]] = {}
+    for row in universe.itertuples(index=False):
+        sym = symbols.get(row.code)
+        if sym is None:
+            continue
+        shift = sym["entry_shift"]
+        for day in shift.index[shift.to_numpy(dtype=bool)]:
+            entry_by_day.setdefault(day, []).append(row.code)
+
     cash = float(initial_cash)
     position_cash = initial_cash / max_positions * exposure
     positions: dict[str, dict[str, Any]] = {}
@@ -406,12 +418,11 @@ def run_signal_backtest(
             del positions[code]
 
         if len(positions) < max_positions:
-            for row in universe.itertuples(index=False):
-                if row.code in positions or len(positions) >= max_positions:
+            # 只遍历当天有入场信号的股票（entry_by_day 预构建），而非全市场 5000+ 只
+            for code in entry_by_day.get(day, ()):
+                if code in positions or len(positions) >= max_positions:
                     continue
-                sym = symbols.get(row.code)
-                if sym is None or day not in sym["frame"].index or not bool(sym["entry_shift"].loc[day]):
-                    continue
+                sym = symbols[code]
                 price = costs.slipped_price(float(sym["frame"].loc[day, "open"]), True)
                 shares = round_to_lot(position_cash / price)
                 if shares <= 0:
@@ -421,7 +432,7 @@ def run_signal_backtest(
                 if cash < cost + commission:
                     continue
                 cash -= cost + commission
-                positions[row.code] = {
+                positions[code] = {
                     "name": sym["name"], "entry_date": day, "entry_price": price,
                     "shares": shares, "cost": cost + commission,
                     "entry_breakout": float(sym["breakout_ref"].loc[day]),
