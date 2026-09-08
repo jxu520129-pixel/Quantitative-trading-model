@@ -15,7 +15,7 @@ import pandas as pd
 
 from .database import Database
 from .event_similarity import format_similarity_section_html, similar_event_review
-from .industry_chain import INDUSTRY_CHAIN, affected_industries
+from .industry_chain import INDUSTRY_CHAIN, TUSHARE_TO_CHAIN, affected_industries
 from .ml_model import model_info, predict_main_rally_probability
 
 
@@ -293,9 +293,20 @@ def match_event_candidates(
     hit_industries = set(affected_industries(event_text)) | affected
     matched: list[dict[str, Any]] = []
     for c in candidates:
-        industry = c.get("industry") or ""
-        chains = [name for name in INDUSTRY_CHAIN if name in industry]
-        if any(chain in hit_industries for chain in chains):
+        tushare_industry = c.get("industry") or ""
+        # 优先用 Tushare 行业映射到标准行业（解决 stock_industry 存的是 Tushare 原始名
+        # 而 INDUSTRY_CHAIN 是 17 个标准 key 之间的不匹配问题）
+        chain = TUSHARE_TO_CHAIN.get(tushare_industry)
+        hit = False
+        if chain and chain in hit_industries:
+            hit = True
+        else:
+            # 退化：直接在 Tushare 行业名里包含 INDUSTRY_CHAIN 的 key
+            for k in INDUSTRY_CHAIN:
+                if k in tushare_industry and k in hit_industries:
+                    hit = True
+                    break
+        if hit:
             matched.append(c)
     matched.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
     return matched[:limit]
@@ -332,11 +343,50 @@ def format_daily_events_html(
     opportunities = [e for e in core if str(e.get("causal_direction") or "") != "负"]
     risks = [e for e in core if str(e.get("causal_direction") or "") == "负"]
 
+    # 数据库后备池：当主升浪候选池（candidates）为空或某事件在候选池无匹配时，
+    # 从数据库查「该事件行业」的活跃股票（带最新 close）作为后备匹配池。
+    # 解决"今天没主升浪形态完成 → 所有事件都无匹配"的问题。
+    target_chain: set[str] = set()
+    for e in core:
+        affected = e.get("affected_industries") or ""
+        title = e.get("title") or ""
+        target_chain.update(affected_industries(title + " " + affected))
+    target_tushare: set[str] = {t for t, c in TUSHARE_TO_CHAIN.items() if c and c in target_chain}
+    fallback_stocks: list[dict[str, Any]] = []
+    if target_tushare:
+        ph = ",".join("?" * len(target_tushare))
+        try:
+            rows = database.query_all(
+                f"""SELECT sb.code, sb.name, si.industry, db.close AS price
+                    FROM stock_basic sb
+                    JOIN stock_industry si ON sb.code = si.code
+                    JOIN daily_bars db ON db.code = sb.code
+                       AND db.trade_date = (SELECT MAX(trade_date) FROM daily_bars)
+                    WHERE si.industry IN ({ph})
+                      AND sb.security_type='STOCK' AND sb.is_st=0 AND sb.is_delisted=0
+                    ORDER BY db.close DESC LIMIT 80""",
+                list(target_tushare),
+            )
+            for r in rows:
+                fallback_stocks.append({
+                    "code": r["code"], "name": r["name"], "industry": r["industry"],
+                    "price": float(r["price"] or 0), "score": 50.0, "price_date": "",
+                })
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("查询事件后备股票池失败：%s", error)
+    # 合并候选池（主升浪候选优先，去重）
+    seen_codes: set[str] = {c.get("code") for c in candidates if c.get("code")}
+    merged_candidates: list[dict[str, Any]] = list(candidates)
+    for s in fallback_stocks:
+        if s["code"] not in seen_codes:
+            merged_candidates.append(s)
+            seen_codes.add(s["code"])
+
     def _event_card(idx: int, ev: dict[str, Any], border_color: str) -> None:
         mag = int(ev.get("magnitude") or 1)
         direction = str(ev.get("causal_direction") or "中性")
         color = _DIR_COLOR.get(direction, "#7f8c8d")
-        stocks = match_event_candidates(ev, candidates, limit=3)
+        stocks = match_event_candidates(ev, merged_candidates, limit=3)
         parts.append(
             f'<div style="border:1px solid #e8ecef;border-left:3px solid {border_color};border-radius:6px;'
             'padding:8px 12px;margin:8px 0;background:#fbfcfd;">'
