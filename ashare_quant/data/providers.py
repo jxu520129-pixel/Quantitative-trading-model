@@ -226,7 +226,13 @@ class TushareProvider(MarketDataProvider):
         raw = raw.rename(
             columns={"trade_date": "日期", "open": "开盘", "high": "最高", "low": "最低", "close": "收盘", "vol": "成交量", "amount": "成交额", "pre_close": "昨收"}
         )
-        return normalize_bars(raw, self.name)
+        result = normalize_bars(raw, self.name)
+        # Tushare 的 amount 单位是「千元」、vol 单位是「手」，与 AkShare（元/股）不一致。
+        # 统一为「元」「股」口径，避免与 scan.min_average_amount（元）等配置失配，
+        # 否则全市场都会被流动性过滤掉（茅台日成交额 20 亿元 ≈ 208 万「千元」< 1 亿「元」阈值）。
+        result["amount"] = result["amount"] * 1000
+        result["volume"] = result["volume"] * 100
+        return result
 
     def realtime_quotes(self, codes: list[str] | None = None) -> pd.DataFrame:
         raise NotImplementedError("V1 的 Tushare 备用数据源暂不支持实时行情")
