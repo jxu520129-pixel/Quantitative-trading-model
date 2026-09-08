@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import html as _html
 import json
 import logging
@@ -215,11 +216,12 @@ def _validate_factor_node(node: ast.AST) -> None:
     raise ValueError(f"不支持的表达式：{type(node).__name__}")
 
 
-def evaluate_factor(expression: str, frame: pd.DataFrame) -> pd.Series:
-    """在 AST 白名单内安全求值因子公式，返回对齐 frame.index 的 float Series。
+@functools.lru_cache(maxsize=256)
+def _compile_factor(expression: str) -> Any:
+    """解析并白名单校验因子公式，返回编译后的 code 对象（带缓存，避免重复 AST 解析）。
 
-    仅允许 OHLCV 列名与 shift/rolling/pct_change/ewm/diff/clip 等有限方法，
-    不允许任意属性访问、函数调用或下标，杜绝代码注入。
+    在向量化回测里，同一因子表达式会对全市场数千只股票反复求值，缓存 AST 解析
+    省去大量重复的 ``ast.parse`` + 校验开销。
     """
     if not expression or not expression.strip():
         raise ValueError("因子公式不能为空")
@@ -231,13 +233,29 @@ def evaluate_factor(expression: str, frame: pd.DataFrame) -> pd.Series:
         _validate_factor_node(tree)
     except ValueError as error:
         raise ValueError(f"公式解析失败：{error}") from error
-    namespace = {column: frame[column].astype(float) for column in _FACTOR_COLUMNS}
+    return compile(tree, "<factor>", "eval")
+
+
+def _factor_namespace(columns: dict[str, Any]) -> dict[str, Any]:
+    """构造因子求值命名空间：OHLCV 列（Series 或宽表 DataFrame）+ 内置函数。"""
+    namespace = {column: columns[column].astype(float) for column in _FACTOR_COLUMNS}
     namespace.update({
         "abs": abs, "min": min, "max": max, "round": round, "sum": sum,
         "float": float, "int": int, "bool": bool,
     })
+    return namespace
+
+
+def evaluate_factor(expression: str, frame: pd.DataFrame) -> pd.Series:
+    """在 AST 白名单内安全求值因子公式，返回对齐 frame.index 的 float Series。
+
+    仅允许 OHLCV 列名与 shift/rolling/pct_change/ewm/diff/clip 等有限方法，
+    不允许任意属性访问、函数调用或下标，杜绝代码注入。
+    """
+    code = _compile_factor(expression)
+    namespace = _factor_namespace(frame)
     try:
-        result = eval(compile(tree, "<factor>", "eval"), {"__builtins__": {}}, namespace)  # noqa: S307
+        result = eval(code, {"__builtins__": {}}, namespace)  # noqa: S307
     except Exception as error:
         raise ValueError(f"公式求值失败：{error}") from error
     if isinstance(result, pd.Series):
@@ -245,6 +263,29 @@ def evaluate_factor(expression: str, frame: pd.DataFrame) -> pd.Series:
     if np.isscalar(result):
         return pd.Series(float(result), index=frame.index)
     return pd.Series(np.asarray(result, dtype=float), index=frame.index)
+
+
+def evaluate_factor_wide(expression: str, wide: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """对宽表（每列一只股票）向量化求值因子，返回因子宽表 ``DataFrame``。
+
+    与 :func:`evaluate_factor` 共用同一套 AST 白名单与求值逻辑，只是命名空间里的
+    OHLCV 列从单股 Series 换成宽表 DataFrame——pandas 的 shift/rolling/pct_change
+    等方法对 DataFrame 逐列生效，因此一次就能算出全市场所有股票的因子值。
+    """
+    code = _compile_factor(expression)
+    namespace = _factor_namespace(wide)
+    try:
+        result = eval(code, {"__builtins__": {}}, namespace)  # noqa: S307
+    except Exception as error:
+        raise ValueError(f"公式求值失败：{error}") from error
+    if isinstance(result, pd.DataFrame):
+        return result.astype(float)
+    if np.isscalar(result):
+        return pd.DataFrame(float(result), index=next(iter(wide.values())).index,
+                            columns=next(iter(wide.values())).columns)
+    return pd.DataFrame(np.asarray(result, dtype=float),
+                        index=next(iter(wide.values())).index,
+                        columns=next(iter(wide.values())).columns)
 
 
 def evaluate_conditions(
@@ -326,13 +367,12 @@ def run_signal_backtest(
     min_avg_volume = float(scan_cfg.get("min_average_volume", 0) or 0) or None
 
     bars_by_code = data_service.load_bars_many(universe["code"].tolist(), start_date, end_date)
-    symbols: dict[str, dict[str, Any]] = {}
-    calendar: set[pd.Timestamp] = set()
+    # 第一步：价格与流动性过滤（只做一次，与盘中扫描口径一致），保留通过过滤的标的
+    filtered: list[tuple[str, str, pd.DataFrame]] = []
     for row in universe.itertuples(index=False):
         frame = bars_by_code.get(row.code)
         if frame is None or frame.empty or len(frame) < 2:
             continue
-        # 价格与流动性过滤（只做一次，与盘中扫描口径一致）
         effective_price = float(frame["close"].iloc[-1])
         if min_price is not None and effective_price < min_price:
             continue
@@ -342,12 +382,28 @@ def run_signal_backtest(
             continue
         if min_avg_volume is not None and float(frame["volume"].tail(20).mean()) < min_avg_volume:
             continue
-        factor_values = {name: evaluate_factor(expr, frame) for name, expr in factor_exprs.items()}
+        filtered.append((row.code, row.name, frame))
+
+    # 第二步：把通过过滤的标的合并成宽表（union 日期 + ffill），向量化一次算全部因子，
+    # 替代原来的「逐股 evaluate_factor」（全市场 5000+ 次 Python 循环）。
+    wide: dict[str, pd.DataFrame] = {
+        col: pd.DataFrame({code: frame[col] for code, _name, frame in filtered}).sort_index().ffill()
+        for col in sorted(_FACTOR_COLUMNS)
+    }
+    factor_wide: dict[str, pd.DataFrame] = {
+        name: evaluate_factor_wide(expr, wide) for name, expr in factor_exprs.items()
+    }
+
+    # 第三步：逐股从因子宽表取列，构造入场/离场掩码（仅布尔比较，开销远小于因子计算）
+    symbols: dict[str, dict[str, Any]] = {}
+    calendar: set[pd.Timestamp] = set()
+    for code, name, frame in filtered:
+        factor_values = {fn: factor_wide[fn].loc[frame.index, code] for fn in factor_exprs}
         entry_mask = evaluate_conditions(factor_values, entry_conditions, entry_combine)
         # 离场条件可为空（仅依赖止损/止盈/移动止损/跌破箱体离场）
         exit_mask = evaluate_conditions(factor_values, exit_conditions, exit_combine) if exit_conditions else pd.Series(False, index=frame.index)
-        symbols[row.code] = {
-            "name": row.name,
+        symbols[code] = {
+            "name": name,
             "frame": frame,
             "entry_shift": entry_mask.shift(1, fill_value=False),
             "exit_shift": exit_mask.shift(1, fill_value=False),
