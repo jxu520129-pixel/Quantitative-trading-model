@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..config import Settings
 from ..data.service import DataService
 from ..database import Database
+from ..market_rules import board_price_limit
 from ..models import Signal, utc_now_text
 from ..notifications import NotificationHub
 from ..presentation import label_value
@@ -52,6 +53,9 @@ class SignalService:
             as_of_date=effective_date, universe=universe, bars_by_code=bars_by_code,
             held_codes=held, max_positions=int(self.settings.risk["max_positions"]),
         ))
+        # 涨停不追：信号生成日当天已涨停的标的次日往往继续涨停（连板/一字板），
+        # 模拟盘按次日晨间撮合会「涨停买不进」，属无效信号。这里统一剔除，减少追连板妖股。
+        signals = self._drop_limit_up(signals, effective_date)
         self.database.executemany(
             """INSERT OR IGNORE INTO signals(id,code,name,action,as_of_date,strategy,target_weight,score,reason,status,created_at)
                VALUES(?,?,?,?,?,?,?,?,?,'NEW',?)""",
@@ -65,3 +69,19 @@ class SignalService:
             )
             self.notifications.send("策略交易信号", summary)
         return signals
+
+    def _drop_limit_up(self, signals: list[Signal], effective_date: str) -> list[Signal]:
+        """剔除信号生成日当天已涨停的标的（追连板股次日涨停买不进，属无效信号）。"""
+        kept: list[Signal] = []
+        for item in signals:
+            bar = self.database.query_one(
+                "SELECT close, pre_close FROM daily_bars WHERE code=? AND trade_date=?",
+                (item.code, effective_date),
+            )
+            if bar and bar["pre_close"]:
+                limit = board_price_limit(item.code, is_st=False)
+                limit_price = round(float(bar["pre_close"]) * (1 + limit), 2)
+                if float(bar["close"]) >= limit_price - 0.005:
+                    continue
+            kept.append(item)
+        return kept
