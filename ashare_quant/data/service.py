@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import timedelta
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
@@ -25,6 +26,8 @@ class DataService:
     def __init__(self, database: Database, settings: Settings):
         self.database = database
         self.settings = settings
+        # 日线磁盘缓存路径（parquet）：缓存全市场日线长表，二次回测/扫描秒开，避免重复读 SQLite
+        self._bars_cache_path = Path(self.database.path).parent / "bars_cache.parquet"
         primary_name = str(settings.data.get("primary", "akshare")).lower()
         fallback_name = str(settings.data.get("fallback", "tushare")).lower()
         self.primary: MarketDataProvider = self._build_provider(primary_name, settings)
@@ -213,10 +216,21 @@ class DataService:
 
         形状与 ``load_bars`` 一致（以 trade_date 为索引，并保留 trade_date 列）；
         无数据的标的不会出现在返回字典中。分批构造 IN 子句以规避 SQLite 变量上限。
+
+        带磁盘缓存（parquet）：数据库未更新时直接读缓存，二次回测/扫描秒开，
+        避免重复读 SQLite 全市场 900 万行（40~60s）。
         """
         codes = list(dict.fromkeys(str(code).zfill(6) for code in codes))
         if not codes:
             return {}
+        cached = self._read_bars_cache(codes, start_date, end_date)
+        if cached is not None:
+            return cached
+        frames = self._load_bars_many_impl(codes, start_date, end_date)
+        self._write_bars_cache(frames)
+        return frames
+
+    def _load_bars_many_impl(self, codes: list[str], start_date: str | None, end_date: str | None) -> dict[str, pd.DataFrame]:
         clauses: list[str] = []
         params: list[str] = []
         if start_date:
@@ -250,6 +264,57 @@ class DataService:
         finally:
             conn.close()
         return frames
+
+    def _read_bars_cache(self, codes: list[str], start_date: str | None, end_date: str | None) -> dict[str, pd.DataFrame] | None:
+        """读日线磁盘缓存；命中返回 ``{code: DataFrame}``，未命中/失效返回 None。"""
+        if not self._bars_cache_path.exists():
+            return None
+        db_path = Path(self.database.path)
+        if not db_path.exists() or self._bars_cache_path.stat().st_mtime < db_path.stat().st_mtime:
+            return None  # 数据库更新过 → 缓存失效
+        try:
+            frame = pd.read_parquet(self._bars_cache_path)
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("读日线缓存失败：%s", error)
+            return None
+        if frame.empty:
+            return None
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+        cache_min = frame["trade_date"].min()
+        cache_max = frame["trade_date"].max()
+        if start_date and pd.Timestamp(normalize_date(start_date)) < cache_min:
+            return None
+        if end_date and pd.Timestamp(normalize_date(end_date)) > cache_max:
+            return None
+        # 过滤 code + 日期范围，转回 {code: DataFrame}
+        codes_set = set(codes)
+        sub = frame[frame["code"].isin(codes_set)]
+        if start_date:
+            sub = sub[sub["trade_date"] >= pd.Timestamp(normalize_date(start_date))]
+        if end_date:
+            sub = sub[sub["trade_date"] <= pd.Timestamp(normalize_date(end_date))]
+        if sub.empty:
+            return {}
+        columns = ["trade_date", "open", "high", "low", "close", "volume", "amount", "pre_close"]
+        sub = sub.sort_values(["code", "trade_date"]).set_index("trade_date", drop=False)
+        return {code: grp[columns] for code, grp in sub.groupby("code", sort=False)}
+
+    def _write_bars_cache(self, frames: dict[str, pd.DataFrame]) -> None:
+        """把加载结果合并成长表写入 parquet 缓存（仅当数据量足够大，避免小查询也写缓存）。"""
+        if len(frames) < 500:
+            return
+        long_frames: list[pd.DataFrame] = []
+        for code, f in frames.items():
+            sub = f[["trade_date", "open", "high", "low", "close", "volume", "amount", "pre_close"]].copy()
+            sub["code"] = code
+            # 价格/量用 float32 减半缓存体积（内存更省），成交额保留 float64 精度
+            for col in ("open", "high", "low", "close", "volume", "pre_close"):
+                sub[col] = sub[col].astype("float32")
+            long_frames.append(sub)
+        try:
+            pd.concat(long_frames, ignore_index=True).to_parquet(self._bars_cache_path, index=False)
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("写日线缓存失败：%s", error)
 
     def latest_bar(self, code: str) -> dict[str, object] | None:
         """返回单只标的最新一根日线（无数据返回 None）。"""

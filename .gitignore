@@ -8,6 +8,7 @@ __pycache__/
 htmlcov/
 data/*.db
 data/*.db-*
+data/*.parquet
 data/models/
 logs/
 .idea/
