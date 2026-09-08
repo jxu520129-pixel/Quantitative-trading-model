@@ -6,7 +6,7 @@ from typing import Any
 
 from ..config import Settings
 from ..database import Database
-from ..market_rules import LOT_SIZE, TradingCosts, at_limit, round_to_lot
+from ..market_rules import LOT_SIZE, TradingCosts, at_limit, board_price_limit, round_to_lot
 from ..models import Account, OrderRequest, OrderSide, OrderStatus, Position, utc_now_text
 from ..risk import RiskManager
 from ..utils import normalize_date
@@ -97,7 +97,16 @@ class PaperBroker(Broker):
                 continue
             try:
                 if at_limit(float(bar["open"]), bar["pre_close"], order["code"], order["side"]):
-                    self._reject(order, "委托被涨跌停限制拦截")
+                    pre_close = float(bar["pre_close"])
+                    open_price = float(bar["open"])
+                    limit_pct = board_price_limit(order["code"], is_st=False)
+                    if order["side"] == "BUY":
+                        limit_price = round(pre_close * (1 + limit_pct), 2)
+                        detail = (f"涨停拦截 {order['code']}：开盘价{open_price:.2f} ≥ 涨停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}涨停）")
+                    else:
+                        limit_price = round(pre_close * (1 - limit_pct), 2)
+                        detail = (f"跌停拦截 {order['code']}：开盘价{open_price:.2f} ≤ 跌停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}跌停）")
+                    self._reject(order, detail)
                     outcome["rejected"] += 1
                     continue
                 self._fill(order, bar, trade_date)
