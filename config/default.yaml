@@ -39,7 +39,11 @@ data:
   backtest_max_symbols: 7000
 
 strategy:
-  active: lab_signal
+  # 留空 = 运行「因子实验室 → 策略定义」里全部**已启用**的自定义策略，
+  # 每个策略独立生成买卖点、独立执行止损止盈（推荐）。
+  # 也可指定策略，多个用英文逗号分隔，例如：lab:箱体突破,lab:超跌反弹
+  # 注意：不要再填 lab_signal —— 它把全部策略合并打分，只有买点、没有卖点和止损。
+  active: ""
 
 strategies:
   momentum_rotation:
