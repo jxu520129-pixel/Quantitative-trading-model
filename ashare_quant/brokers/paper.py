@@ -219,7 +219,12 @@ class PaperBroker(Broker):
             market_value = 0.0
             for raw in positions:
                 position = dict(raw)
-                bar = conn.execute("SELECT close FROM daily_bars WHERE code=? AND trade_date=?", (position["code"], trade_date)).fetchone()
+                # 取「不晚于 trade_date 的最近一个交易日」收盘价：当日日线缺失（更新失败/停牌）时
+                # 用最近可用收盘价估值，避免静默沿用可能停留在买入价的旧 latest_price。
+                bar = conn.execute(
+                    "SELECT close FROM daily_bars WHERE code=? AND trade_date<=? ORDER BY trade_date DESC LIMIT 1",
+                    (position["code"], trade_date),
+                ).fetchone()
                 price = float(bar["close"]) if bar else float(position["latest_price"])
                 market_value += int(position["quantity"]) * price
                 conn.execute("UPDATE positions SET latest_price=?,updated_at=? WHERE code=?", (price, utc_now_text(), position["code"]))

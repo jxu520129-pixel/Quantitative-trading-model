@@ -599,41 +599,81 @@ with holdings:
             "SELECT code,name,quantity,sellable_quantity,avg_cost,latest_price "
             "FROM positions WHERE quantity>0 ORDER BY latest_price*quantity DESC"
         )
+        if not rows:
+            st.info("暂无持仓")
+            return
+        # 价格优先级：新浪实时行情 > 最新交易日数据库收盘价 > positions.latest_price。
+        # 不能直接回退到 positions.latest_price：该字段只在撮合/收盘估值（mark_to_market）
+        # 时刷新，若当日日线缺失会被静默跳过，看板于是长期停留在旧价（甚至买入价）。
+        # 仅交易时段请求实时行情：非交易时段第三方接口返回的本就是收盘价，
+        # 而看板按 refresh_seconds（默认 10s）高频轮询易触发新浪限流，直接读数据库更稳。
+        def _in_trading_hours() -> bool:
+            stamp = pd.Timestamp.now()
+            if stamp.weekday() >= 5:
+                return False
+            hm = stamp.strftime("%H:%M")
+            return "09:15" <= hm <= "11:30" or "13:00" <= hm <= "15:05"
+
         quotes: dict[str, float] = {}
         live_ok = False
-        if rows:
+        if _in_trading_hours():
             try:
                 quotes = sina_spot_prices([row["code"] for row in rows])
                 live_ok = bool(quotes)
             except Exception:
                 quotes = {}
+        db_date = ""
+        db_prices: dict[str, float] = {}
+        try:
+            latest = app.database.query_one("SELECT MAX(trade_date) AS d FROM daily_bars")
+            db_date = str(latest["d"]) if latest and latest["d"] else ""
+            if db_date:
+                db_prices = {
+                    str(r["code"]): float(r["close"] or 0)
+                    for r in app.database.query_all(
+                        "SELECT code,close FROM daily_bars WHERE trade_date=?", (db_date,)
+                    )
+                }
+        except Exception:
+            db_prices = {}
         records = []
         for row in rows:
-            price = float(quotes.get(row["code"]) or row["latest_price"] or 0)
+            code = row["code"]
+            if quotes.get(code):
+                price, price_date = float(quotes[code]), "实时"
+            elif db_prices.get(code):
+                price, price_date = db_prices[code], db_date
+            else:
+                price, price_date = float(row["latest_price"] or 0), "持仓快照"
             cost = float(row["avg_cost"] or 0)
             quantity = int(row["quantity"])
             records.append({
-                "证券代码": row["code"],
+                "证券代码": code,
                 "证券名称": row["name"],
                 "数量": quantity,
                 "可卖数量": int(row["sellable_quantity"]),
                 "持仓成本": cost,
                 "最新价格": price,
+                "价格日期": price_date,
                 "持仓市值": quantity * price,
                 "浮动盈亏": (price - cost) * quantity,
                 "盈亏比例": price / cost - 1 if cost > 0 else None,
             })
-        if not records:
-            st.info("暂无持仓")
-            return
         view = pd.DataFrame(records)
         total_pnl = float(view["浮动盈亏"].sum())
         total_color = "#ff6b6b" if total_pnl > 0 else "#36C98F" if total_pnl < 0 else "#e6edf3"
-        source = "新浪实时行情" if live_ok else "数据库收盘价（实时行情暂不可用）"
+        if live_ok:
+            source = "新浪实时行情"
+        elif db_date:
+            source = f"数据库收盘价（截至 {db_date}）"
+        else:
+            source = "数据库价格（缺日线数据）"
+        today = pd.Timestamp.now().strftime("%Y-%m-%d")
+        stale_warn = "　⚠️ 日线未更新至今日，现价可能滞后" if not live_ok and db_date and db_date != today else ""
         updated = pd.Timestamp.now().strftime("%H:%M:%S")
         st.markdown(
             f"<span style='font-size:0.92rem'>{source} · 上次更新 {updated} · "
-            f"合计浮动盈亏 <b style='color:{total_color}'>¥{total_pnl:+,.2f}</b></span>",
+            f"合计浮动盈亏 <b style='color:{total_color}'>¥{total_pnl:+,.2f}</b>{stale_warn}</span>",
             unsafe_allow_html=True,
         )
         st.dataframe(
