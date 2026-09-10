@@ -154,6 +154,18 @@ class Database:
         connection.execute("PRAGMA cache_size=-50000")
         return connection
 
+    def ensure_schema(self) -> None:
+        """仅建表（幂等），**不写入任何演示数据**。
+
+        用于已有完整数据的库（如全市场 ``hist`` 库）补齐缺失表：这类库不走
+        ``initialize``（那会插入演示初始资金、开关等污染数据），但回测落库、
+        选股池查询等逻辑仍要求相关表存在。``CREATE TABLE IF NOT EXISTS``
+        保证不会破坏已有表与数据。
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, self.connect() as conn:
+            conn.executescript(SCHEMA)
+
     def initialize(self, initial_cash: float) -> None:
         """建库建表、执行旧库列迁移并写入模拟账户/风控/开关初始状态（幂等）。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)

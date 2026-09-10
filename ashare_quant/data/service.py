@@ -28,6 +28,8 @@ class DataService:
         self.settings = settings
         # 日线磁盘缓存路径（parquet）：缓存全市场日线长表，二次回测/扫描秒开，避免重复读 SQLite
         self._bars_cache_path = Path(self.database.path).parent / "bars_cache.parquet"
+        # 库中 trade_date 的存储格式：dash=YYYY-MM-DD（默认演示库）/ compact=YYYYMMDD（hist 全市场库）
+        self._date_style: str | None = None
         primary_name = str(settings.data.get("primary", "akshare")).lower()
         fallback_name = str(settings.data.get("fallback", "tushare")).lower()
         self.primary: MarketDataProvider = self._build_provider(primary_name, settings)
@@ -192,16 +194,34 @@ class DataService:
         )
         return len(rows)
 
+    def _db_date(self, value: str) -> str:
+        """把规范化日期（YYYY-MM-DD）转成**该库实际存储**的 trade_date 格式。
+
+        默认演示库存 ``YYYY-MM-DD``，而全市场 hist 库存紧凑格式 ``YYYYMMDD``。
+        不做转换时，`trade_date <= '2026-08-28'` 会因字符串序（'-' < '0'）把
+        所有紧凑格式数据**静默滤掉**，表现为「没有可用于回测的日线数据」。
+        格式只探测一次并缓存。
+        """
+        normalized = normalize_date(value)
+        if self._date_style is None:
+            try:
+                row = self.database.query_one("SELECT trade_date FROM daily_bars LIMIT 1")
+                sample = str(row["trade_date"]) if row else ""
+            except Exception:  # noqa: BLE001
+                sample = ""
+            self._date_style = "compact" if sample.isdigit() else "dash"
+        return normalized.replace("-", "") if self._date_style == "compact" else normalized
+
     def load_bars(self, code: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
         """加载单只标的日线（按日期升序，以 trade_date 为索引）。"""
         clauses = ["code=?"]
         params: list[str] = [code]
         if start_date:
             clauses.append("trade_date>=?")
-            params.append(normalize_date(start_date))
+            params.append(self._db_date(start_date))
         if end_date:
             clauses.append("trade_date<=?")
-            params.append(normalize_date(end_date))
+            params.append(self._db_date(end_date))
         frame = pd.DataFrame(self.database.query_all(
             f"SELECT trade_date,open,high,low,close,volume,amount,pre_close FROM daily_bars WHERE {' AND '.join(clauses)} ORDER BY trade_date",
             params,
@@ -235,10 +255,10 @@ class DataService:
         params: list[str] = []
         if start_date:
             clauses.append("trade_date>=?")
-            params.append(normalize_date(start_date))
+            params.append(self._db_date(start_date))
         if end_date:
             clauses.append("trade_date<=?")
-            params.append(normalize_date(end_date))
+            params.append(self._db_date(end_date))
         columns = ["trade_date", "open", "high", "low", "close", "volume", "amount", "pre_close"]
         where_extra = (" AND " + " AND ".join(clauses)) if clauses else ""
         frames: dict[str, pd.DataFrame] = {}

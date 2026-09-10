@@ -345,16 +345,26 @@ def evaluate_conditions(
 
 
 def resolve_factor_expressions(database: Any, names: list[str]) -> dict[str, str]:
-    """将因子名解析为公式：优先查自定义因子表，其次内置公式。"""
+    """将因子名解析为公式：优先查自定义因子表，其次内置公式。
+
+    回测用的 hist 库不会执行 ``initialize``，因此可能没有 ``custom_factors`` 表；
+    此处对查询失败容错，直接回退到内置公式，避免整条回测链路因缺表而中断。
+    """
     exprs: dict[str, str] = {}
     for name in names:
-        row = database.query_one("SELECT expression FROM custom_factors WHERE name=?", (name,))
-        if row:
-            exprs[name] = str(row["expression"])
-        elif name in BUILTIN_FACTOR_FORMULAS:
-            exprs[name] = BUILTIN_FACTOR_FORMULAS[name][1]
-        else:
-            raise ValueError(f"未知因子：{name}")
+        expression: str | None = None
+        try:
+            row = database.query_one("SELECT expression FROM custom_factors WHERE name=?", (name,))
+            if row:
+                expression = str(row["expression"])
+        except Exception:  # noqa: BLE001  # 缺表/库结构不同时回退内置公式
+            expression = None
+        if expression is None:
+            if name in BUILTIN_FACTOR_FORMULAS:
+                expression = BUILTIN_FACTOR_FORMULAS[name][1]
+            else:
+                raise ValueError(f"未知因子：{name}")
+        exprs[name] = expression
     return exprs
 
 
@@ -502,7 +512,10 @@ def run_signal_backtest(
                 if code in positions or len(positions) >= max_positions:
                     continue
                 sym = symbols[code]
-                price = costs.slipped_price(float(sym["frame"].loc[day, "open"]), True)
+                open_price = float(sym["frame"].loc[day, "open"])
+                if not open_price or open_price <= 0:
+                    continue  # 停牌或脏数据（open=0）无法成交，跳过避免除零
+                price = costs.slipped_price(open_price, True)
                 shares = round_to_lot(position_cash / price)
                 if shares <= 0:
                     continue

@@ -18,7 +18,10 @@ from .signals import SignalService
 from .trading import TradingService
 
 
-ROOT = Path(__file__).resolve().parents[1]
+# 本文件位于 ashare_quant/services/ 下，需上溯两层才到项目根
+# （此前误用 parents[1]，只到 ashare_quant 包目录，导致 HIST_DB 指向不存在的路径，
+#   prefer_hist_db=True 从未生效、回测一直落在空的演示库上）
+ROOT = Path(__file__).resolve().parents[2]
 HIST_DB = ROOT / "data" / "ashare_quant_hist.db"
 
 
@@ -51,7 +54,11 @@ def build_runtime(config_path: str | None = None, prefer_hist_db: bool = False) 
     use_hist = prefer_hist_db and HIST_DB.exists()
     db_path = HIST_DB if use_hist else settings.db_path
     database = Database(db_path)
-    if not use_hist:
+    if use_hist:
+        # hist 库不做 initialize（避免插入演示初始资金/开关污染回测数据），
+        # 但需补齐缺失的表（回测落库、选股池查询等依赖），仅建表、不写数据。
+        database.ensure_schema()
+    else:
         database.initialize(settings.paper_initial_cash)
     notifications = NotificationHub(settings)
     data = DataService(database, settings)
