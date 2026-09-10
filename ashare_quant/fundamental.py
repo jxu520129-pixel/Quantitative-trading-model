@@ -198,7 +198,10 @@ def fetch_global_events(database: Database, limit: int = 200) -> int:
         event_time = item["event_time"]
         text = title + " " + summary
         event_id = hashlib.md5(f"{title}|{event_time}".encode("utf-8")).hexdigest()
-        # 受影响行业统一用关键词函数映射到标准行业（含上下游），不依赖 LLM 自由文本
+        # 受影响行业统一用关键词函数映射到标准行业（含上下游传导），不依赖 LLM 自由文本。
+        # 注意：本字段含产业链上下游传导，集合很宽（科技类新闻几乎都会带上「半导体」），
+        # 只适合做「个股事件分」这类聚合评分。做「事件 → 个股」精确匹配请改用
+        # industry_chain.direct_industries，否则不同事件会匹配到同一批个股。
         industries = ",".join(affected_industries(text))
         if i in llm_results:
             r = llm_results[i]

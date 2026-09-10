@@ -15,7 +15,7 @@ import pandas as pd
 
 from .database import Database
 from .event_similarity import format_similarity_section_html, similar_event_review
-from .industry_chain import INDUSTRY_CHAIN, TUSHARE_TO_CHAIN, affected_industries
+from .industry_chain import INDUSTRY_CHAIN, TUSHARE_TO_CHAIN, affected_industries, direct_industries
 from .ml_model import model_info, predict_main_rally_probability
 
 
@@ -279,18 +279,28 @@ def top_events_today(database: Database, limit: int = 15) -> list[dict[str, Any]
 
 
 def match_event_candidates(
-    event: dict[str, Any], candidates: list[dict[str, Any]], limit: int = 5
+    event: dict[str, Any], candidates: list[dict[str, Any]], limit: int = 5, exact: bool = True
 ) -> list[dict[str, Any]]:
     """找出与某事件相关的候选股票（按综合评分降序）。
 
-    匹配依据：把事件标题 + affected_industries 合并成文本，用产业链关键词映射到
-    标准行业（含上下游），候选股票所属行业命中即匹配。
+    匹配依据：事件标题 + 摘要命中产业链关键词 → 映射到标准行业，候选股票所属行业
+    命中即匹配（候选池股票先经 ``TUSHARE_TO_CHAIN`` 把 Tushare 行业名桥接成标准行业）。
+
+    ``exact=True``（默认）只用**直接命中**的行业，避免上下游传导让几乎所有科技类事件
+    都带上「半导体」，从而匹配到同一批个股；``exact=False`` 回退到含上下游的宽松匹配，
+    仅用于精确匹配无果时的兜底。
     """
-    affected = {a.strip() for a in (event.get("affected_industries") or "").split(",") if a.strip()}
     title = event.get("title") or ""
-    event_text = title + " " + " ".join(affected)
-    # 标准行业（含上下游）+ 直接把 LLM 给出的 affected_industries 也当作命中关键词
-    hit_industries = set(affected_industries(event_text)) | affected
+    text = (title + " " + (event.get("summary") or "")).strip()
+    if not text:
+        text = title + " " + (event.get("affected_industries") or "")
+    if exact:
+        hit_industries = set(direct_industries(text))
+    else:
+        affected = {a.strip() for a in (event.get("affected_industries") or "").split(",") if a.strip()}
+        hit_industries = set(affected_industries(text)) | affected
+    if not hit_industries:
+        return []
     matched: list[dict[str, Any]] = []
     for c in candidates:
         tushare_industry = c.get("industry") or ""
@@ -343,50 +353,59 @@ def format_daily_events_html(
     opportunities = [e for e in core if str(e.get("causal_direction") or "") != "负"]
     risks = [e for e in core if str(e.get("causal_direction") or "") == "负"]
 
-    # 数据库后备池：当主升浪候选池（candidates）为空或某事件在候选池无匹配时，
-    # 从数据库查「该事件行业」的活跃股票（带最新 close）作为后备匹配池。
-    # 解决"今天没主升浪形态完成 → 所有事件都无匹配"的问题。
-    target_chain: set[str] = set()
-    for e in core:
-        affected = e.get("affected_industries") or ""
-        title = e.get("title") or ""
-        target_chain.update(affected_industries(title + " " + affected))
-    target_tushare: set[str] = {t for t, c in TUSHARE_TO_CHAIN.items() if c and c in target_chain}
-    fallback_stocks: list[dict[str, Any]] = []
-    if target_tushare:
-        ph = ",".join("?" * len(target_tushare))
-        try:
-            rows = database.query_all(
-                f"""SELECT sb.code, sb.name, si.industry, db.close AS price
-                    FROM stock_basic sb
-                    JOIN stock_industry si ON sb.code = si.code
-                    JOIN daily_bars db ON db.code = sb.code
-                       AND db.trade_date = (SELECT MAX(trade_date) FROM daily_bars)
-                    WHERE si.industry IN ({ph})
-                      AND sb.security_type='STOCK' AND sb.is_st=0 AND sb.is_delisted=0
-                    ORDER BY db.close DESC LIMIT 80""",
-                list(target_tushare),
-            )
-            for r in rows:
-                fallback_stocks.append({
-                    "code": r["code"], "name": r["name"], "industry": r["industry"],
-                    "price": float(r["price"] or 0), "score": 50.0, "price_date": "",
-                })
-        except Exception as error:  # noqa: BLE001
-            LOG.warning("查询事件后备股票池失败：%s", error)
-    # 合并候选池（主升浪候选优先，去重）
-    seen_codes: set[str] = {c.get("code") for c in candidates if c.get("code")}
-    merged_candidates: list[dict[str, Any]] = list(candidates)
-    for s in fallback_stocks:
-        if s["code"] not in seen_codes:
-            merged_candidates.append(s)
-            seen_codes.add(s["code"])
+    # 事件专属后备池：主升浪候选池（candidates）为空、或某事件在候选池无匹配时，
+    # 按**该事件自己的直接命中行业**查数据库活跃股票（每行业分别限额），作为该事件专属池。
+    #
+    # 注意：这里刻意「按事件单独建池」，而非把所有事件的行业合并成一个全局池。
+    # 旧实现把所有事件行业求并集后 `ORDER BY close DESC LIMIT 80`，等价于取全市场最贵的
+    # 80 只股票；再叠加 affected_industries 的上下游传导（半导体↔计算机↔通信↔化学↔电气
+    # 高度连通，几乎每个科技事件都会带出「半导体」），于是不同事件全部匹配到同一批高价股。
+    def _query_event_pool(ev: dict[str, Any], per_industry: int = 12) -> list[dict[str, Any]]:
+        text = ((ev.get("title") or "") + " " + (ev.get("summary") or "")).strip()
+        if not text:
+            text = (ev.get("title") or "") + " " + (ev.get("affected_industries") or "")
+        industries = direct_industries(text)
+        if not industries:
+            return []
+        tushare_names = [t for t, c in TUSHARE_TO_CHAIN.items() if c and c in industries]
+        pool: list[dict[str, Any]] = []
+        for name in tushare_names:
+            try:
+                rows = database.query_all(
+                    """SELECT sb.code, sb.name, si.industry, db.close AS price
+                       FROM stock_basic sb
+                       JOIN stock_industry si ON sb.code = si.code
+                       JOIN daily_bars db ON db.code = sb.code
+                          AND db.trade_date = (SELECT MAX(trade_date) FROM daily_bars)
+                       WHERE si.industry = ?
+                         AND sb.security_type='STOCK' AND sb.is_st=0 AND sb.is_delisted=0
+                       ORDER BY db.close DESC LIMIT ?""",
+                    (name, per_industry),
+                )
+                for r in rows:
+                    pool.append({
+                        "code": r["code"], "name": r["name"], "industry": r["industry"],
+                        "price": float(r["price"] or 0), "score": 50.0, "price_date": "",
+                    })
+            except Exception as error:  # noqa: BLE001
+                LOG.warning("查询事件后备股票池失败（%s）：%s", name, error)
+        return pool
+
+    def _event_stocks(ev: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
+        """按「主升浪候选(精确) → 事件专属库池(精确) → 候选(含上下游宽松)」梯度匹配核心标的。"""
+        hit = match_event_candidates(ev, candidates, limit=limit)
+        if hit:
+            return hit
+        hit = match_event_candidates(ev, _query_event_pool(ev), limit=limit)
+        if hit:
+            return hit
+        return match_event_candidates(ev, candidates, limit=limit, exact=False)
 
     def _event_card(idx: int, ev: dict[str, Any], border_color: str) -> None:
         mag = int(ev.get("magnitude") or 1)
         direction = str(ev.get("causal_direction") or "中性")
         color = _DIR_COLOR.get(direction, "#7f8c8d")
-        stocks = match_event_candidates(ev, merged_candidates, limit=3)
+        stocks = _event_stocks(ev, limit=3)
         parts.append(
             f'<div style="border:1px solid #e8ecef;border-left:3px solid {border_color};border-radius:6px;'
             'padding:8px 12px;margin:8px 0;background:#fbfcfd;">'

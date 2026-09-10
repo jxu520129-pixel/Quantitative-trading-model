@@ -132,3 +132,19 @@ def affected_industries(event_text: str) -> list[str]:
             hits.extend(info["upstream"])
             hits.extend(info["downstream"])
     return list(dict.fromkeys(hits))
+
+
+def direct_industries(event_text: str) -> list[str]:
+    """只返回事件文本**直接命中**的行业，不传导上下游。
+
+    用于「事件 → 个股」的精确匹配。``affected_industries`` 会把上下游一并纳入，
+    而 INDUSTRY_CHAIN 高度连通（半导体↔计算机↔通信↔化学↔电气 互为上下游），
+    导致几乎所有科技类新闻的命中集合都包含「半导体」，不同事件于是匹配到同一批个股。
+    精确匹配场景改走本函数。
+    """
+    hits = [
+        industry
+        for industry, info in INDUSTRY_CHAIN.items()
+        if any(keyword in event_text for keyword in info["keywords"])
+    ]
+    return list(dict.fromkeys(hits))
