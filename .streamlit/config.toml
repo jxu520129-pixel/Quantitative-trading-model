@@ -1,6 +1,8 @@
 [theme]
 base = "dark"
-primaryColor = "#36C98F"
+# 品牌强调色用蓝（与看板 CSS 的 --accent 一致）。原为 #36C98F，而该色在 A 股语境下
+# 是「跌」的颜色，用作 primaryColor 会与涨红跌绿的数据语义冲突（多选标签/选中态显绿）。
+primaryColor = "#1F6FEB"
 backgroundColor = "#090B0D"
 secondaryBackgroundColor = "#12161A"
 textColor = "#E8ECEF"

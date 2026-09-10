@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import inspect
 import json
 from uuid import uuid4
 
@@ -81,6 +82,18 @@ st.markdown(
       div.stButton > button[kind="primary"]:hover { background: #388bfd; color: #ffffff; }
       /* 信息框 */
       [data-testid="stAlert"] { border-radius: 6px; }
+      /* 策略选择：pill 式多选——所有选项平铺展示、点击即切换，比下拉更直观。
+         配色交由主题 primaryColor（.streamlit/config.toml）统一控制，这里只调形制
+         （圆角/字号/间距），避免依赖具体 DOM 属性反而丢掉选中态。 */
+      [data-testid="stPills"] { gap: 0.45rem !important; }
+      [data-testid="stPills"] button {
+        border-radius: 999px !important;
+        font-size: 0.85rem !important; font-weight: 500 !important;
+        padding: 0.3rem 0.95rem !important; min-height: 34px !important;
+        transition: border-color .15s ease, background .15s ease;
+      }
+      /* 回退到 multiselect 时的标签圆角（配色同上，由 primaryColor 控制） */
+      [data-baseweb="tag"] { border-radius: 4px !important; }
       /* 隐藏默认工具栏 */
       [data-testid="stToolbar"], [data-testid="stElementToolbar"] { display: none !important; }
       /* 段落间距 */
@@ -221,18 +234,43 @@ lab_strategy_names = [
 ]
 strategy_options = [f"lab:{name}" for name in lab_strategy_names]
 saved_raw = app.control.get("active_strategy", "")
+# 区分「从未配置」与「显式清空」：前者默认全选，后者要保持为空
+has_saved = app.database.query_one("SELECT 1 AS ok FROM system_settings WHERE key='active_strategy'") is not None
 saved_selected = [part for part in (p.strip() for p in saved_raw.split(",")) if part in strategy_options]
+picker_help = "每个策略各自独立买卖、独立止损止盈；总持仓仍受风控上限约束。直接点击切换选中状态。"
 if not strategy_options:
     selected_strategies: list[str] = []
     ctrl_strategy.warning("尚无自定义策略，请先在「因子实验室 → 策略定义」中创建")
 else:
-    selected_strategies = ctrl_strategy.multiselect(
-        "策略（可多选）", strategy_options, default=saved_selected or strategy_options,
-        disabled=not is_admin, format_func=label_strategy,
-        help="每个策略各自独立买卖、独立止损止盈；总持仓仍受风控上限约束",
-    )
+    initial = saved_selected if has_saved else strategy_options
+    if hasattr(ctrl_strategy, "pills"):
+        # Streamlit ≥1.40：pill 式多选——所有策略平铺展示，点击即切换，无需展开下拉。
+        # 在 column 内 pills 默认单行横向滚动（不易发现被截断的选项），
+        # 较新版本支持 wrap=True 换行显示，这里做版本探测以免旧版报 TypeError。
+        pill_extra: dict = {}
+        try:
+            if "wrap" in inspect.signature(ctrl_strategy.pills).parameters:
+                pill_extra["wrap"] = True
+        except (TypeError, ValueError):
+            pass
+        selected_strategies = ctrl_strategy.pills(
+            "策略（可多选）", strategy_options, selection_mode="multi", default=initial,
+            disabled=not is_admin, format_func=label_strategy, help=picker_help, **pill_extra,
+        ) or []
+    else:
+        selected_strategies = ctrl_strategy.multiselect(
+            "策略（可多选）", strategy_options, default=initial,
+            disabled=not is_admin, format_func=label_strategy, help=picker_help,
+        )
+    # 统一按选项顺序归一化：避免点击顺序影响后续「同分比较」的确定性
+    picked = set(selected_strategies)
+    selected_strategies = [opt for opt in strategy_options if opt in picked]
     if is_admin and selected_strategies != saved_selected:
         app.control.set("active_strategy", ",".join(selected_strategies))
+    if selected_strategies:
+        ctrl_strategy.caption(f"已选 {len(selected_strategies)} / {len(strategy_options)} 个策略")
+    else:
+        ctrl_strategy.caption("未选择策略，将回退为运行全部已启用策略")
 selected_strategy = ",".join(selected_strategies)
 
 st.markdown("**交易步骤**（选股信号 → 风控排队 → 执行成交，覆盖买入/卖出）")
