@@ -634,11 +634,24 @@ with overview:
         st.subheader("资产构成")
         st.line_chart(plot_display, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#58A6FF", "#8B949E", "#D29922"])
 with holdings:
+    # 刷新间隔持久化到 system_settings：否则只存在 session_state，退出看板/刷新页面即回到默认 10 秒
+    refresh_options = [10, 5, 15, 30, 60, 0]
+    saved_refresh = app.control.get("holdings_refresh_seconds", "")
+    try:
+        saved_refresh_value = int(saved_refresh)
+    except (TypeError, ValueError):
+        saved_refresh_value = refresh_options[0]
+    if saved_refresh_value not in refresh_options:
+        saved_refresh_value = refresh_options[0]
     refresh_seconds = st.selectbox(
         "浮动盈亏实时刷新间隔（秒，0=暂停刷新）",
-        [10, 5, 15, 30, 60, 0],
+        refresh_options,
+        index=refresh_options.index(saved_refresh_value),
         key="holdings_refresh_seconds",
+        help="选择后自动保存，刷新页面或重新打开看板都会沿用该值",
     )
+    if str(refresh_seconds) != saved_refresh:
+        app.control.set("holdings_refresh_seconds", str(refresh_seconds))
 
     def _pnl_color(value: float) -> str:
         if value > 0:
