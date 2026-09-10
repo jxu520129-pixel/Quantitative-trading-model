@@ -15,7 +15,13 @@ import pandas as pd
 
 from .database import Database
 from .event_similarity import format_similarity_section_html, similar_event_review
-from .industry_chain import INDUSTRY_CHAIN, TUSHARE_TO_CHAIN, affected_industries, direct_industries
+from .industry_chain import (
+    INDUSTRY_CHAIN,
+    TUSHARE_TO_CHAIN,
+    affected_industries,
+    direct_industries,
+    macro_industries,
+)
 from .ml_model import model_info, predict_main_rally_probability
 
 
@@ -279,7 +285,11 @@ def top_events_today(database: Database, limit: int = 15) -> list[dict[str, Any]
 
 
 def match_event_candidates(
-    event: dict[str, Any], candidates: list[dict[str, Any]], limit: int = 5, exact: bool = True
+    event: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    limit: int = 5,
+    exact: bool = True,
+    industries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """找出与某事件相关的候选股票（按综合评分降序）。
 
@@ -287,14 +297,17 @@ def match_event_candidates(
     命中即匹配（候选池股票先经 ``TUSHARE_TO_CHAIN`` 把 Tushare 行业名桥接成标准行业）。
 
     ``exact=True``（默认）只用**直接命中**的行业，避免上下游传导让几乎所有科技类事件
-    都带上「半导体」，从而匹配到同一批个股；``exact=False`` 回退到含上下游的宽松匹配，
-    仅用于精确匹配无果时的兜底。
+    都带上「半导体」，从而匹配到同一批个股；``exact=False`` 回退到含上下游的宽松匹配。
+    ``industries`` 显式给定命中行业时优先级最高，用于宏观兜底（降准 → 银行/地产/券商）
+    这类事件本身没有行业词、但需要按指定板块取股的情形。
     """
     title = event.get("title") or ""
     text = (title + " " + (event.get("summary") or "")).strip()
     if not text:
         text = title + " " + (event.get("affected_industries") or "")
-    if exact:
+    if industries is not None:
+        hit_industries = set(industries)
+    elif exact:
         hit_industries = set(direct_industries(text))
     else:
         affected = {a.strip() for a in (event.get("affected_industries") or "").split(",") if a.strip()}
@@ -358,13 +371,34 @@ def format_daily_events_html(
     #
     # 注意：这里刻意「按事件单独建池」，而非把所有事件的行业合并成一个全局池。
     # 旧实现把所有事件行业求并集后 `ORDER BY close DESC LIMIT 80`，等价于取全市场最贵的
-    # 80 只股票；再叠加 affected_industries 的上下游传导（半导体↔计算机↔通信↔化学↔电气
+    # 80 只股票；再叠加 affected_industries 的上下游传导（半导体↔计算机↔通信↔化工↔电力设备
     # 高度连通，几乎每个科技事件都会带出「半导体」），于是不同事件全部匹配到同一批高价股。
-    def _query_event_pool(ev: dict[str, Any], per_industry: int = 12) -> list[dict[str, Any]]:
+    _name_cache: dict[str, list[tuple[str, str]]] = {}
+
+    def _event_text(ev: dict[str, Any]) -> str:
         text = ((ev.get("title") or "") + " " + (ev.get("summary") or "")).strip()
-        if not text:
-            text = (ev.get("title") or "") + " " + (ev.get("affected_industries") or "")
-        industries = direct_industries(text)
+        return text or ((ev.get("title") or "") + " " + (ev.get("affected_industries") or ""))
+
+    def _stock_names() -> list[tuple[str, str]]:
+        """全市场股票简称（≥3 字、排除 ST/退市），用于事件文本里的公司名直配。"""
+        if "v" not in _name_cache:
+            try:
+                rows = database.query_all(
+                    "SELECT code, name FROM stock_basic "
+                    "WHERE security_type='STOCK' AND is_st=0 AND is_delisted=0 AND length(name)>=3"
+                )
+                _name_cache["v"] = [(r["code"], r["name"]) for r in rows]
+            except Exception as error:  # noqa: BLE001
+                LOG.warning("查询股票名称索引失败：%s", error)
+                _name_cache["v"] = []
+        return _name_cache["v"]
+
+    def _query_industry_pool(industries: list[str], per_industry: int = 12) -> list[dict[str, Any]]:
+        """按标准行业查活跃股票，每个 Tushare 行业分别限额。
+
+        排序用 **成交额** 而非收盘价：股价高低与「与事件的相关度」无关，按 close 排序会让
+        高价股垄断每个行业的名额；成交额代表流动性与市场关注度，更适合作为行业代表标的。
+        """
         if not industries:
             return []
         tushare_names = [t for t, c in TUSHARE_TO_CHAIN.items() if c and c in industries]
@@ -379,7 +413,7 @@ def format_daily_events_html(
                           AND db.trade_date = (SELECT MAX(trade_date) FROM daily_bars)
                        WHERE si.industry = ?
                          AND sb.security_type='STOCK' AND sb.is_st=0 AND sb.is_delisted=0
-                       ORDER BY db.close DESC LIMIT ?""",
+                       ORDER BY db.amount DESC LIMIT ?""",
                     (name, per_industry),
                 )
                 for r in rows:
@@ -391,12 +425,57 @@ def format_daily_events_html(
                 LOG.warning("查询事件后备股票池失败（%s）：%s", name, error)
         return pool
 
+    def _match_by_name(ev: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+        """事件文本里直接出现 A 股公司简称时，优先精确命中该股（最可靠的相关性信号）。"""
+        text = _event_text(ev)
+        if not text:
+            return []
+        codes = [code for code, name in _stock_names() if name in text][:limit]
+        if not codes:
+            return []
+        placeholders = ",".join("?" * len(codes))
+        try:
+            rows = database.query_all(
+                f"""SELECT sb.code, sb.name, si.industry, db.close AS price
+                    FROM stock_basic sb
+                    LEFT JOIN stock_industry si ON sb.code = si.code
+                    LEFT JOIN daily_bars db ON db.code = sb.code
+                       AND db.trade_date = (SELECT MAX(trade_date) FROM daily_bars)
+                    WHERE sb.code IN ({placeholders})""",
+                codes,
+            )
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("公司名直配查询失败：%s", error)
+            return []
+        return [
+            {"code": r["code"], "name": r["name"], "industry": r["industry"] or "",
+             "price": float(r["price"] or 0), "score": 50.0, "price_date": ""}
+            for r in rows
+        ]
+
     def _event_stocks(ev: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
-        """按「主升浪候选(精确) → 事件专属库池(精确) → 候选(含上下游宽松)」梯度匹配核心标的。"""
+        """多级匹配该事件的核心标的，由精确到宽松依次尝试：
+
+        ① 事件文本直接提到 A 股公司简称 → 直接命中该股；
+        ② 主升浪候选池按「直接命中行业」匹配；
+        ③ 事件专属后备池（按直接命中行业查库，成交额排序取代表股）；
+        ④ 宏观兜底（事件无行业词时用宏观→受益板块，如降准 → 银行/地产/券商）；
+        ⑤ 候选池放宽到含上下游的宽松匹配。
+        """
+        hit = _match_by_name(ev, limit)
+        if hit:
+            return hit
         hit = match_event_candidates(ev, candidates, limit=limit)
         if hit:
             return hit
-        hit = match_event_candidates(ev, _query_event_pool(ev), limit=limit)
+        text = _event_text(ev)
+        hit = match_event_candidates(ev, _query_industry_pool(direct_industries(text)), limit=limit)
+        if hit:
+            return hit
+        macro = macro_industries(text)
+        hit = match_event_candidates(
+            ev, _query_industry_pool(macro), limit=limit, industries=macro
+        )
         if hit:
             return hit
         return match_event_candidates(ev, candidates, limit=limit, exact=False)
