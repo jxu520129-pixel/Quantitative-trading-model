@@ -13,13 +13,22 @@ import streamlit as st
 from ashare_quant.hot_strategy import run_hot_backtest
 from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest
 from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, BUILTIN_STRATEGY_TEMPLATES, build_buy_report, evaluate_factor, fetch_scan_quotes, resolve_factor_expressions, run_signal_backtest
-from ashare_quant.data.providers import sina_spot_prices
+from ashare_quant.data.providers import spot_prices
 from ashare_quant.models import utc_now_text
 from ashare_quant.services.runtime import build_runtime
 from ashare_quant.services.trading import next_weekday
 from ashare_quant.presentation import STRATEGY_LABELS, label_strategy, label_value, localize_dataframe
 from ashare_quant.strategies.factory import STRATEGIES
 from ashare_quant.utils import today_text
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_spot_prices(codes: tuple[str, ...]) -> tuple[dict[str, float], str]:
+    """缓存实时行情 15 秒，避免看板 fragment 按 refresh_seconds 重跑时重复请求数据源。
+
+    行情源本身已做多源降级（新浪→腾讯），缓存进一步削峰，降低单源被限流的概率。
+    """
+    return spot_prices(list(codes))
 
 
 st.set_page_config(page_title="A 股量化交易控制台", page_icon="Q", layout="wide", initial_sidebar_state="collapsed")
@@ -606,7 +615,7 @@ with holdings:
         # 不能直接回退到 positions.latest_price：该字段只在撮合/收盘估值（mark_to_market）
         # 时刷新，若当日日线缺失会被静默跳过，看板于是长期停留在旧价（甚至买入价）。
         # 仅交易时段请求实时行情：非交易时段第三方接口返回的本就是收盘价，
-        # 而看板按 refresh_seconds（默认 10s）高频轮询易触发新浪限流，直接读数据库更稳。
+        # 而看板按 refresh_seconds（默认 10s）高频轮询易触发限流，直接读数据库更稳。
         def _in_trading_hours() -> bool:
             stamp = pd.Timestamp.now()
             if stamp.weekday() >= 5:
@@ -616,12 +625,11 @@ with holdings:
 
         quotes: dict[str, float] = {}
         live_ok = False
+        live_source = ""
         if _in_trading_hours():
-            try:
-                quotes = sina_spot_prices([row["code"] for row in rows])
-                live_ok = bool(quotes)
-            except Exception:
-                quotes = {}
+            # 多源串行降级（新浪→腾讯）+ 15s 缓存：单源限流或高频轮询时仍能取到实时价。
+            quotes, live_source = _cached_spot_prices(tuple(row["code"] for row in rows))
+            live_ok = bool(quotes)
         db_date = ""
         db_prices: dict[str, float] = {}
         try:
@@ -663,7 +671,7 @@ with holdings:
         total_pnl = float(view["浮动盈亏"].sum())
         total_color = "#ff6b6b" if total_pnl > 0 else "#36C98F" if total_pnl < 0 else "#e6edf3"
         if live_ok:
-            source = "新浪实时行情"
+            source = live_source or "实时行情"
         elif db_date:
             source = f"数据库收盘价（截至 {db_date}）"
         else:

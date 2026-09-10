@@ -77,8 +77,8 @@ def tushare_pro_from_env() -> Any | None:
 def sina_spot_prices(codes: list[str], timeout: float = 5.0) -> dict[str, float]:
     """新浪实时报价（按需轻量拉取，只请求给定代码，适合看板高频轮询展示）。
 
-    返回 {code: 最新价}；价格无效或停牌为 0 的代码不会出现在结果里，
-    调用方应回退到数据库 latest_price。失败时直接抛异常由调用方兜底。
+    返回 {code: 最新价}；价格无效或停牌为 0 的代码不会出现在结果里。
+    失败时直接抛异常由调用方兜底。
     """
     import requests
 
@@ -103,6 +103,59 @@ def sina_spot_prices(codes: list[str], timeout: float = 5.0) -> dict[str, float]
         if price > 0:
             result[str(code).zfill(6)] = price
     return result
+
+
+def tencent_spot_prices(codes: list[str], timeout: float = 5.0) -> dict[str, float]:
+    """腾讯行情实时报价（新浪限流/不可用时的备用实时源）。
+
+    返回 {code: 最新价}；价格无效或停牌为 0 的代码不会出现在结果里。
+    失败时直接抛异常由调用方兜底。
+    """
+    import requests
+
+    symbols = ",".join(_with_exchange_prefix(code) for code in codes)
+    response = requests.get(f"https://qt.gtimg.cn/q={symbols}", timeout=timeout)
+    response.raise_for_status()
+    response.encoding = "gbk"
+    result: dict[str, float] = {}
+    for line in response.text.split(";"):
+        head, _, payload = line.strip().partition("=")
+        if not payload:
+            continue
+        fields = payload.strip().strip('"').split("~")
+        try:
+            price = float(fields[3])
+        except (IndexError, ValueError):
+            continue
+        if price > 0:
+            result[head.strip()[-6:]] = price
+    return result
+
+
+# 实时行情源优先级：新浪为主，腾讯为备。单一数据源（尤其新浪）对云服务器 IP
+# 可能限流，串行降级才能保证交易时段仍能取到实时价。
+SPOT_PRICE_SOURCES: tuple[tuple[str, Callable[[list[str], float], dict[str, float]]], ...] = (
+    ("新浪实时行情", sina_spot_prices),
+    ("腾讯实时行情", tencent_spot_prices),
+)
+
+
+def spot_prices(codes: list[str], timeout: float = 5.0) -> tuple[dict[str, float], str]:
+    """依次尝试多个实时行情源，返回 (价格字典, 命中源名称)。
+
+    全部失败返回 ``({}, "")``，由调用方回退到数据库最新交易日收盘价。
+    """
+    if not codes:
+        return {}, ""
+    for name, fetcher in SPOT_PRICE_SOURCES:
+        try:
+            prices = fetcher(list(codes), timeout)
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("实时行情源「%s」失败：%s", name, error)
+            continue
+        if prices:
+            return prices, name
+    return {}, ""
 
 
 class AkShareProvider(MarketDataProvider):
