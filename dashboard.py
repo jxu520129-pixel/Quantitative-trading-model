@@ -18,7 +18,6 @@ from ashare_quant.models import utc_now_text
 from ashare_quant.services.runtime import build_runtime
 from ashare_quant.services.trading import next_weekday
 from ashare_quant.presentation import STRATEGY_LABELS, label_strategy, label_value, localize_dataframe
-from ashare_quant.strategies.factory import STRATEGIES
 from ashare_quant.utils import today_text
 
 
@@ -214,14 +213,27 @@ if is_admin and new_strategy_enabled != strategy_enabled:
 if is_admin and new_paper_enabled != paper_enabled:
     app.control.set_bool("paper_execution_enabled", new_paper_enabled)
 
-strategy_options = list(STRATEGIES)
-active_strategy = app.control.get("active_strategy", app.settings.active_strategy)
-selected_strategy = ctrl_strategy.selectbox(
-    "策略", strategy_options, index=strategy_options.index(active_strategy) if active_strategy in strategy_options else 0,
-    disabled=not is_admin, format_func=label_strategy,
-)
-if is_admin and selected_strategy != active_strategy:
-    app.control.set("active_strategy", selected_strategy)
+# 策略选项 = 因子实验室里的自定义策略（signal_strategies 表），支持多选并行。
+# 每个策略独立生成买卖信号、独立执行止损止盈（见 strategies/lab_custom.py），
+# 不再走 lab_signal 的「合并全部策略打分」模式（那会导致只有买点、没有卖点与止损）。
+lab_strategy_names = [
+    str(row["name"]) for row in app.database.query_all("SELECT name FROM signal_strategies ORDER BY created_at DESC")
+]
+strategy_options = [f"lab:{name}" for name in lab_strategy_names]
+saved_raw = app.control.get("active_strategy", "")
+saved_selected = [part for part in (p.strip() for p in saved_raw.split(",")) if part in strategy_options]
+if not strategy_options:
+    selected_strategies: list[str] = []
+    ctrl_strategy.warning("尚无自定义策略，请先在「因子实验室 → 策略定义」中创建")
+else:
+    selected_strategies = ctrl_strategy.multiselect(
+        "策略（可多选）", strategy_options, default=saved_selected or strategy_options,
+        disabled=not is_admin, format_func=label_strategy,
+        help="每个策略各自独立买卖、独立止损止盈；总持仓仍受风控上限约束",
+    )
+    if is_admin and selected_strategies != saved_selected:
+        app.control.set("active_strategy", ",".join(selected_strategies))
+selected_strategy = ",".join(selected_strategies)
 
 st.markdown("**交易步骤**（选股信号 → 风控排队 → 执行成交，覆盖买入/卖出）")
 step_1, step_2, step_3 = st.columns(3)
@@ -605,7 +617,7 @@ with holdings:
     @st.fragment(run_every=None if refresh_seconds == 0 else int(refresh_seconds))
     def _live_holdings():
         rows = app.database.query_all(
-            "SELECT code,name,quantity,sellable_quantity,avg_cost,latest_price "
+            "SELECT code,name,quantity,sellable_quantity,avg_cost,latest_price,strategy,trail_peak "
             "FROM positions WHERE quantity>0 ORDER BY latest_price*quantity DESC"
         )
         if not rows:
@@ -658,6 +670,7 @@ with holdings:
             records.append({
                 "证券代码": code,
                 "证券名称": row["name"],
+                "归属策略": label_strategy(row["strategy"]) if row["strategy"] else "—",
                 "数量": quantity,
                 "可卖数量": int(row["sellable_quantity"]),
                 "持仓成本": cost,
@@ -711,10 +724,26 @@ with holdings:
             except Exception as error:
                 st.error(str(error))
 with orders:
+    # 按策略筛选：多策略并行时，每个策略的委托/成交可单独查看
+    order_filter = st.selectbox(
+        "按策略筛选", ["全部"] + selected_strategies,
+        format_func=lambda key: "全部策略" if key == "全部" else label_strategy(key),
+        key="orders_strategy_filter",
+    )
+    scoped = order_filter != "全部"
     st.subheader("委托记录")
-    st.dataframe(localize_dataframe(frame("SELECT trade_date,code,name,side,quantity,fill_price,status,strategy,error,created_at FROM orders ORDER BY created_at DESC LIMIT 300")), width="stretch", hide_index=True)
+    st.dataframe(localize_dataframe(frame(
+        "SELECT trade_date,code,name,side,quantity,fill_price,status,strategy,error,created_at "
+        f"FROM orders{' WHERE strategy=?' if scoped else ''} ORDER BY created_at DESC LIMIT 300",
+        (order_filter,) if scoped else (),
+    )), width="stretch", hide_index=True)
     st.subheader("成交记录")
-    st.dataframe(localize_dataframe(frame("SELECT filled_at,code,side,quantity,price,commission,stamp_duty FROM fills ORDER BY id DESC LIMIT 300")), width="stretch", hide_index=True)
+    st.dataframe(localize_dataframe(frame(
+        "SELECT f.filled_at,f.code,o.name,f.side,f.quantity,f.price,f.commission,f.stamp_duty,o.strategy "
+        f"FROM fills f LEFT JOIN orders o ON o.id=f.order_id{' WHERE o.strategy=?' if scoped else ''} "
+        "ORDER BY f.id DESC LIMIT 300",
+        (order_filter,) if scoped else (),
+    )), width="stretch", hide_index=True)
 with signals_tab:
     st.dataframe(localize_dataframe(frame("SELECT as_of_date,code,name,action,target_weight,score,strategy,status,reason FROM signals ORDER BY created_at DESC LIMIT 300")), width="stretch", hide_index=True)
 with risk_tab:
@@ -746,7 +775,7 @@ with settings_tab:
             st.rerun()
     st.dataframe(pd.DataFrame([
         {"项目": "运行模式", "值": label_value(app.settings.mode, "mode")},
-        {"项目": "默认策略", "值": STRATEGY_LABELS.get(selected_strategy, selected_strategy)},
+        {"项目": "已选策略", "值": "、".join(label_strategy(s) for s in selected_strategies) or "未选择"},
         {"项目": "数据主源", "值": app.settings.data["primary"]},
         {"项目": "Tushare", "值": "已配置" if app.settings.tushare_token else "未配置"},
         {"项目": "企业微信", "值": "已配置" if app.settings.wecom_webhook else "未配置"},

@@ -151,6 +151,39 @@ def _to_pct(value: Any) -> float | None:
     return pct if pct > 0 else None
 
 
+def evaluate_exit(
+    exit_config: dict[str, Any] | None,
+    entry_price: float,
+    close: float,
+    trail_peak: float,
+    entry_breakout: float = 0.0,
+    factor_exit: bool = False,
+) -> str | None:
+    """判断持仓是否触发离场，返回离场原因；未触发返回 ``None``。
+
+    模拟盘与回测共用这套口径，保证「回测里怎么写、模拟盘就怎么执行」。
+    优先级：止损 > 止盈 > 移动止损 > 跌破箱体 > 条件离场。
+    """
+    config = exit_config or {}
+    stop_loss = _to_pct(config.get("stop_loss_pct"))
+    take_profit = _to_pct(config.get("take_profit_pct"))
+    trailing_stop = _to_pct(config.get("trailing_stop_pct"))
+    breakout_exit = bool(config.get("breakout_exit"))
+    entry = float(entry_price or 0.0)
+    peak = max(float(trail_peak or 0.0), entry)
+    if stop_loss is not None and entry > 0 and close <= entry * (1 - stop_loss):
+        return f"止损（-{stop_loss:.0%}）"
+    if take_profit is not None and entry > 0 and close >= entry * (1 + take_profit):
+        return f"止盈（+{take_profit:.0%}）"
+    if trailing_stop is not None and peak > 0 and close <= peak * (1 - trailing_stop):
+        return f"移动止损（-{trailing_stop:.0%}）"
+    if breakout_exit and entry_breakout > 0 and close < entry_breakout:
+        return "跌破箱体高点"
+    if factor_exit:
+        return "满足离场条件"
+    return None
+
+
 _FACTOR_COLUMNS = {"open", "high", "low", "close", "volume", "amount", "pre_close"}
 _FACTOR_FUNCTIONS = {"abs", "min", "max", "round", "sum", "float", "int", "bool"}
 _FACTOR_METHODS = {"shift", "pct_change", "rolling", "std", "mean", "diff", "clip", "ewm", "min", "max", "abs", "astype"}
@@ -445,11 +478,11 @@ def run_signal_backtest(
             if not math.isnan(prev_close):
                 pos["trail_peak"] = max(pos["trail_peak"], prev_close)
             factor_exit = bool(sym["exit_shift"].loc[day])
-            stop_hit = stop_loss is not None and prev_close <= pos["entry_price"] * (1 - stop_loss)
-            take_hit = take_profit is not None and prev_close >= pos["entry_price"] * (1 + take_profit)
-            trail_hit = trailing_stop is not None and prev_close <= pos["trail_peak"] * (1 - trailing_stop)
-            breakout_hit = breakout_exit and prev_close < pos["entry_breakout"]
-            if not (factor_exit or stop_hit or take_hit or trail_hit or breakout_hit):
+            reason = evaluate_exit(
+                exit_, pos["entry_price"], prev_close, pos["trail_peak"],
+                entry_breakout=pos["entry_breakout"], factor_exit=factor_exit,
+            )
+            if reason is None:
                 continue
             price = costs.slipped_price(float(sym["frame"].loc[day, "open"]), False)
             proceeds = pos["shares"] * price
@@ -457,16 +490,6 @@ def run_signal_backtest(
             stamp = costs.stamp_duty(proceeds, True)
             cash += proceeds - commission - stamp
             pnl = proceeds - commission - stamp - pos["cost"]
-            if stop_hit:
-                reason = f"止损（-{stop_loss:.0%}）"
-            elif take_hit:
-                reason = f"止盈（+{take_profit:.0%}）"
-            elif trail_hit:
-                reason = f"移动止损（-{trailing_stop:.0%}）"
-            elif breakout_hit:
-                reason = "跌破箱体高点"
-            else:
-                reason = "满足离场条件"
             trades.append(_trade_record(
                 code=code, name=sym["name"], pos=pos, exit_date=day, exit_price=price,
                 pnl=pnl, exit_reason=reason,

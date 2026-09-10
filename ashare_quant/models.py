@@ -74,7 +74,12 @@ class OrderRequest:
 
 @dataclass
 class Position:
-    """单只证券的持仓快照（可变，随成交与估值更新）。"""
+    """单只证券的持仓快照（可变，随成交与估值更新）。
+
+    ``strategy`` 记录该持仓由哪个策略买入（多策略并行时各策略只管理自己的持仓），
+    ``trail_peak`` 是持仓期间最高价（移动止损基准），``entry_breakout`` 是建仓时的
+    箱体基准价（跌破箱体离场用）。
+    """
 
     code: str
     name: str
@@ -83,6 +88,9 @@ class Position:
     avg_cost: float
     latest_price: float
     updated_at: str = ""
+    strategy: str = ""
+    trail_peak: float = 0.0
+    entry_breakout: float = 0.0
 
     @property
     def market_value(self) -> float:

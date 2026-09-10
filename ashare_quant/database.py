@@ -55,7 +55,9 @@ CREATE TABLE IF NOT EXISTS fills (
 );
 CREATE TABLE IF NOT EXISTS positions (
     code TEXT PRIMARY KEY, name TEXT NOT NULL, quantity INTEGER NOT NULL, sellable_quantity INTEGER NOT NULL,
-    avg_cost REAL NOT NULL, latest_price REAL NOT NULL, updated_at TEXT NOT NULL
+    avg_cost REAL NOT NULL, latest_price REAL NOT NULL, updated_at TEXT NOT NULL,
+    strategy TEXT NOT NULL DEFAULT '', trail_peak REAL NOT NULL DEFAULT 0,
+    entry_breakout REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS account_state (
     account_id TEXT PRIMARY KEY, cash REAL NOT NULL, market_value REAL NOT NULL,
@@ -169,6 +171,18 @@ class Database:
                 conn.execute("ALTER TABLE events ADD COLUMN affected_industries TEXT NOT NULL DEFAULT ''")
             if "persistence" not in event_cols:
                 conn.execute("ALTER TABLE events ADD COLUMN persistence TEXT NOT NULL DEFAULT '短期'")
+            # 迁移：为旧库补充 positions 的策略归属与移动止损峰值列
+            position_cols = {row["name"] for row in conn.execute("PRAGMA table_info(positions)")}
+            if "strategy" not in position_cols:
+                conn.execute("ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT ''")
+            if "trail_peak" not in position_cols:
+                # 旧持仓无历史峰值，用成本价兜底（移动止损从成本起步，不虚增浮盈）
+                conn.execute("ALTER TABLE positions ADD COLUMN trail_peak REAL NOT NULL DEFAULT 0")
+                conn.execute("UPDATE positions SET trail_peak=avg_cost WHERE trail_peak<=0")
+            if "entry_breakout" not in position_cols:
+                # 旧持仓无建仓期箱体基准，用成本价兜底（跌破成本即触发箱体离场）
+                conn.execute("ALTER TABLE positions ADD COLUMN entry_breakout REAL NOT NULL DEFAULT 0")
+                conn.execute("UPDATE positions SET entry_breakout=avg_cost WHERE entry_breakout<=0")
             now = utc_now_text()
             conn.execute(
                 "INSERT OR IGNORE INTO account_state(account_id,cash,market_value,total_equity,updated_at) VALUES(?,?,?,?,?)",

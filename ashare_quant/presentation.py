@@ -163,8 +163,14 @@ _MESSAGE_LABELS = {
 
 
 def label_strategy(value: object) -> str:
-    """返回策略的中文名称，未知策略仍展示原标识便于排障。"""
-    return STRATEGY_LABELS.get(str(value), str(value))
+    """返回策略的中文名称，未知策略仍展示原标识便于排障。
+
+    ``lab:<策略名>`` 表示因子实验室里的单个自定义策略，直接展示策略名本身。
+    """
+    text = str(value)
+    if text.startswith("lab:") and text[len("lab:"):].strip():
+        return text[len("lab:"):].strip()
+    return STRATEGY_LABELS.get(text, text)
 
 
 def label_value(value: object, field: str | None = None) -> object:

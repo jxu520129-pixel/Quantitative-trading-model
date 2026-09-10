@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
 
@@ -12,13 +13,18 @@ from ..models import Signal, SignalAction
 
 @dataclass(frozen=True)
 class StrategyContext:
-    """策略生成信号所需的上下文：交易日、候选池、各标的日线、当前持仓与持仓上限。"""
+    """策略生成信号所需的上下文：交易日、候选池、各标的日线、当前持仓与持仓上限。
+
+    ``positions`` 是 code -> 持仓行（含 ``strategy`` 归属、``avg_cost``、``trail_peak``、
+    ``entry_breakout``），供自定义策略判断「哪些持仓归我管」以及各自的止损止盈基准。
+    """
 
     as_of_date: str
     universe: pd.DataFrame
     bars_by_code: dict[str, pd.DataFrame]
     held_codes: set[str]
     max_positions: int
+    positions: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class BaseStrategy(ABC):

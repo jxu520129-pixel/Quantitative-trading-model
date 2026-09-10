@@ -171,14 +171,26 @@ class PaperBroker(Broker):
                 new_quantity = old_quantity + quantity
                 average_cost = (old_quantity * old_cost + amount + commission) / new_quantity
                 if position:
+                    # 补仓：保持原策略归属与建仓基准；峰值取 max(原峰值, 本次成交价)
                     conn.execute(
-                        "UPDATE positions SET quantity=?,sellable_quantity=?,avg_cost=?,latest_price=?,updated_at=? WHERE code=?",
-                        (new_quantity, int(position["sellable_quantity"]), average_cost, price, utc_now_text(), order["code"]),
+                        "UPDATE positions SET quantity=?,sellable_quantity=?,avg_cost=?,latest_price=?,trail_peak=?,updated_at=? WHERE code=?",
+                        (new_quantity, int(position["sellable_quantity"]), average_cost, price,
+                         max(float(position["trail_peak"] or 0), price), utc_now_text(), order["code"]),
                     )
                 else:
+                    # 箱体离场基准：建仓日前 4 个交易日收盘最高（与回测 breakout_ref 口径一致），
+                    # 无足够历史（次新股）时用成交价兜底。
+                    ref_row = conn.execute(
+                        "SELECT MAX(close) AS ref FROM ("
+                        "  SELECT close FROM daily_bars WHERE code=? AND trade_date<? "
+                        "  ORDER BY trade_date DESC LIMIT 4)", (order["code"], trade_date),
+                    ).fetchone()
+                    entry_breakout = float(ref_row["ref"]) if ref_row and ref_row["ref"] else price
                     conn.execute(
-                        "INSERT INTO positions(code,name,quantity,sellable_quantity,avg_cost,latest_price,updated_at) VALUES(?,?,?,?,?,?,?)",
-                        (order["code"], order["name"] or order["code"], new_quantity, 0, average_cost, price, utc_now_text()),
+                        """INSERT INTO positions(code,name,quantity,sellable_quantity,avg_cost,latest_price,strategy,trail_peak,entry_breakout,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (order["code"], order["name"] or order["code"], new_quantity, 0, average_cost, price,
+                         str(order.get("strategy") or ""), price, entry_breakout, utc_now_text()),
                     )
             else:
                 cash = float(account["cash"]) + amount - commission - stamp_duty
@@ -222,12 +234,18 @@ class PaperBroker(Broker):
                 # 取「不晚于 trade_date 的最近一个交易日」收盘价：当日日线缺失（更新失败/停牌）时
                 # 用最近可用收盘价估值，避免静默沿用可能停留在买入价的旧 latest_price。
                 bar = conn.execute(
-                    "SELECT close FROM daily_bars WHERE code=? AND trade_date<=? ORDER BY trade_date DESC LIMIT 1",
+                    "SELECT close, high FROM daily_bars WHERE code=? AND trade_date<=? ORDER BY trade_date DESC LIMIT 1",
                     (position["code"], trade_date),
                 ).fetchone()
                 price = float(bar["close"]) if bar else float(position["latest_price"])
+                # 移动止损峰值：用当日最高价滚动更新（与回测 trail_peak 口径一致）
+                high = float(bar["high"]) if bar and bar["high"] else price
+                peak = max(float(position["trail_peak"] or 0), high)
                 market_value += int(position["quantity"]) * price
-                conn.execute("UPDATE positions SET latest_price=?,updated_at=? WHERE code=?", (price, utc_now_text(), position["code"]))
+                conn.execute(
+                    "UPDATE positions SET latest_price=?,trail_peak=?,updated_at=? WHERE code=?",
+                    (price, peak, utc_now_text(), position["code"]),
+                )
             account = dict(conn.execute("SELECT * FROM account_state WHERE account_id='paper'").fetchone())
             total = float(account["cash"]) + market_value
             # 当日盈亏以「上一个交易日」的快照为基线，避免同日多次估值互相污染口径。

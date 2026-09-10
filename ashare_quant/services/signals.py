@@ -6,7 +6,7 @@ from ..config import Settings
 from ..data.service import DataService
 from ..database import Database
 from ..market_rules import board_price_limit
-from ..models import Signal, utc_now_text
+from ..models import Signal, SignalAction, utc_now_text
 from ..notifications import NotificationHub
 from ..presentation import label_value
 from ..strategies import build_strategy
@@ -22,9 +22,42 @@ class SignalService:
         self.settings = settings
         self.notifications = notifications
 
+    # ------------------------------------------------------------------ 策略解析
+    def resolve_strategy_names(self, strategy_name: str | None = None) -> list[str]:
+        """解析本次要运行的策略列表。
+
+        优先级：显式入参 > 看板持久化的 ``active_strategy`` > 配置默认值；都为空的兜底
+        则是「因子实验室里全部已启用的自定义策略」。值为逗号分隔时按多策略处理，
+        并去重保序。
+        """
+        raw = strategy_name
+        if raw is None:
+            row = self.database.query_one("SELECT value FROM system_settings WHERE key='active_strategy'")
+            raw = str(row["value"]) if row and row["value"] else str(self.settings.active_strategy)
+        names = list(dict.fromkeys(part.strip() for part in str(raw).split(",") if part.strip()))
+        if names:
+            return names
+        # 兜底：未配置任何策略时，运行因子实验室里全部已启用的自定义策略，
+        # 避免调度器在「看板尚未选择策略」时回退到无买卖点的合并模式。
+        return [
+            f"lab:{row['name']}"
+            for row in self.database.query_all(
+                "SELECT name FROM signal_strategies WHERE enabled=1 ORDER BY created_at DESC"
+            )
+        ]
+
+    # ------------------------------------------------------------------ 主流程
     def generate(self, as_of_date: str | None = None, strategy_name: str | None = None) -> list[Signal]:
-        """对当前候选池运行策略，生成并落库调仓信号；有新信号时推送「策略交易信号」通知。"""
-        strategy_name = strategy_name or self.settings.active_strategy
+        """对当前候选池运行选中的一个或多个策略，生成并落库调仓信号。
+
+        多策略并行时的合并规则：**卖出信号全部保留**（每个策略只管自己买入的持仓，
+        各自独立止盈止损），**买入信号跨策略统一排序**后按剩余持仓名额截取，
+        保证总持仓不超过 ``max_positions``（多策略共享总名额）。
+        """
+        strategy_names = self.resolve_strategy_names(strategy_name)
+        if not strategy_names:
+            raise RuntimeError("未选择任何策略，请先在看板「策略」中至少选择一个")
+
         universe = self.data.eligible_universe(limit=int(self.settings.data["strategy_scan_symbols"]))
         if universe.empty:
             raise RuntimeError("可用证券池为空，请先更新数据或生成演示行情")
@@ -43,18 +76,27 @@ class SignalService:
         universe = universe[universe["code"].isin(bars_by_code)].reset_index(drop=True)
         if universe.empty:
             raise RuntimeError(f"{effective_date} 没有可用于生成信号的当期日线数据")
-        held = {row["code"] for row in self.database.query_all("SELECT code FROM positions WHERE quantity>0")}
-        params = dict(self.settings.strategies.get(strategy_name, {}))
-        # lab_signal 适配器需要访问数据库读取 signal_strategies 表
-        if strategy_name == "lab_signal":
-            params["_database"] = self.database
-        strategy = build_strategy(strategy_name, params)
-        signals = strategy.generate(StrategyContext(
-            as_of_date=effective_date, universe=universe, bars_by_code=bars_by_code,
-            held_codes=held, max_positions=int(self.settings.risk["max_positions"]),
-        ))
-        # 涨停不追：信号生成日当天已涨停的标的次日往往继续涨停（连板/一字板），
-        # 模拟盘按次日晨间撮合会「涨停买不进」，属无效信号。这里统一剔除，减少追连板妖股。
+
+        positions = {
+            row["code"]: dict(row)
+            for row in self.database.query_all("SELECT * FROM positions WHERE quantity>0")
+        }
+        max_positions = int(self.settings.risk["max_positions"])
+
+        collected: list[Signal] = []
+        for name in strategy_names:
+            params = dict(self.settings.strategies.get(name, {}))
+            # 因子实验室适配器（合并模式 lab_signal / 单策略 lab:xxx）需要读 signal_strategies 表
+            if name == "lab_signal" or name.startswith("lab:"):
+                params["_database"] = self.database
+            strategy = build_strategy(name, params)
+            collected.extend(strategy.generate(StrategyContext(
+                as_of_date=effective_date, universe=universe, bars_by_code=bars_by_code,
+                held_codes=set(positions), max_positions=max_positions, positions=positions,
+            )))
+
+        signals = self._merge_signals(collected, positions, max_positions)
+        # 涨停不追：只剔除「信号生成日已涨停」的**买入**信号（卖出必须放行，否则漏掉止盈止损）
         signals = self._drop_limit_up(signals, effective_date)
         self.database.executemany(
             """INSERT OR IGNORE INTO signals(id,code,name,action,as_of_date,strategy,target_weight,score,reason,status,created_at)
@@ -64,16 +106,37 @@ class SignalService:
         )
         if signals:
             summary = "\n".join(
-                f"{label_value(item.action.value, 'action')} {item.code} {item.name}，评分={item.score:.4f}"
+                f"{label_value(item.action.value, 'action')} {item.code} {item.name}，策略={item.strategy}，评分={item.score:.4f}"
                 for item in signals
             )
             self.notifications.send("策略交易信号", summary)
         return signals
 
+    # ------------------------------------------------------------------ 合并/过滤
+    @staticmethod
+    def _merge_signals(
+        signals: list[Signal], positions: dict[str, dict], max_positions: int
+    ) -> list[Signal]:
+        """跨策略合并信号：卖出全留，买入按评分竞争剩余名额，同一标的只保留一条。"""
+        sells: dict[str, Signal] = {}
+        buys: dict[str, Signal] = {}
+        for item in signals:
+            bucket = sells if item.action == SignalAction.SELL else buys
+            current = bucket.get(item.code)
+            if current is None or float(item.score or 0) > float(current.score or 0):
+                bucket[item.code] = item
+        # 卖出成交后会释放名额，故买入可用名额按「持仓数 − 待卖出数」计算
+        remaining = max(0, max_positions - (len(positions) - len(sells)))
+        ranked = sorted(buys.values(), key=lambda sig: float(sig.score or 0), reverse=True)
+        return list(sells.values()) + ranked[:remaining]
+
     def _drop_limit_up(self, signals: list[Signal], effective_date: str) -> list[Signal]:
-        """剔除信号生成日当天已涨停的标的（追连板股次日涨停买不进，属无效信号）。"""
+        """剔除买入信号中信号生成日当天已涨停的标的（追连板股次日涨停买不进，属无效信号）。"""
         kept: list[Signal] = []
         for item in signals:
+            if item.action != SignalAction.BUY:
+                kept.append(item)  # 卖出信号必须保留，否则止盈止损会被吞掉
+                continue
             bar = self.database.query_one(
                 "SELECT close, pre_close FROM daily_bars WHERE code=? AND trade_date=?",
                 (item.code, effective_date),
