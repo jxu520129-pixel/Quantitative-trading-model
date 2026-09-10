@@ -35,7 +35,7 @@
 │   └── utils.py                    # 日期与通用工具
 ├── config/default.yaml          # 非敏感默认配置
 ├── deploy/                      # systemd 与 cron 示例
-├── scripts/                     # Windows 任务计划 + 历史数据拉取 + 短线策略回测脚本
+├── scripts/                     # Windows 任务计划 + 历史数据拉取 + 短线策略回测脚本 + 策略参数优化
 ├── tests/                       # 核心流程测试
 ├── .streamlit/config.toml       # 黑色主题
 ├── dashboard.py                 # Streamlit 操作看板
@@ -91,6 +91,27 @@ python -m ashare_quant.cli queue-orders
 ```powershell
 python -m ashare_quant.cli update-data --codes 600000,600036,510300
 ```
+
+> **看板持仓价的取价链路（多源降级）**：看板「持仓」页的价格按
+> **新浪实时行情 → 腾讯实时行情 → 最新交易日日线收盘价 → 持仓快照** 依次降级
+> （`ashare_quant/data/providers.py` 的 `spot_prices()`，源顺序见 `SPOT_PRICE_SOURCES`），
+> 单一数据源限流时自动接管。**仅交易时段**（`09:15-11:30` / `13:00-15:05`）请求实时行情 ——
+> 非交易时段第三方返回的本就是收盘价，且看板按 `refresh_seconds` 轮询、高频请求易触发限流；
+> 结果另有 15 秒缓存削峰。持仓表新增「价格日期」列，标注每只持仓实际采用的价格来源与日期，
+> 日线未更新至今日时给出滞后警示。
+>
+> **`positions.latest_price` 是「估值结果」而非权威价格**：它只在 `mark_to_market`
+> （撮合后 / 每日 15:50 收盘估值）时刷新，且取的是「不晚于目标日的**最近一个交易日**」收盘价。
+> 因此**展示层不应直接依赖该字段** —— 缺数据时它会停留在旧值，甚至长期停在买入价；
+> 应以最新交易日 `daily_bars` 收盘价为基准，实时行情只作盘中增强。
+
+### 历史库（hist）回测的注意事项
+
+CLI 回测优先使用全市场历史库 `data/ashare_quant_hist.db`（存在即用）。该库**不做 `initialize`**（避免插入演示资金/开关污染回测），与默认演示库有三处口径差异：
+
+- **`trade_date` 是紧凑格式 `YYYYMMDD`**（默认库是 `YYYY-MM-DD`）。`DataService._db_date()` 已按库实际格式自动适配，**但自己写 SQL 时仍要注意** —— 用 `YYYY-MM-DD` 做字符串比较会因 `'-' < '0'` **静默漏掉数据**。
+- **`amount` 单位是「千元」**（默认库是「元」）。用 DataService 跑 hist 回测时，`scan.min_average_amount`（按「元」设计，默认 1e8）需换算成 **1e5**，否则所有股票都会被流动性过滤掉、报「没有可用于回测的日线数据」。
+- **缺失的表由 `Database.ensure_schema()` 自动补齐**（仅建表、不写数据），覆盖回测落库与选股池查询所需的 `signal_backtest_runs` / `universe_members` 等表。
 
 > **全市场性能说明**：候选池扩展为全市场（约 5000+ 只）后，SQLite 历史库达 1GB+。为控制扫描/查询耗时，系统做了五处针对性优化：① `load_bars_many` 去掉冗余 `ORDER BY`（主键 `(code, trade_date)` 索引已保证有序，此前全量排序慢约 8 倍）；② 数据库连接加大页缓存（`PRAGMA cache_size` 50MB），缓解大库读盘；③ 买点扫描与信号生成只加载最近 260 个交易日（`DataService.lookback_start`，52 周新高因子够用），全市场日线加载从约 4 分钟降到 15 秒内；④ `load_bars_many` 单连接循环 + `pd.read_sql_query` 直读（跳过 `sqlite3.Row→dict→DataFrame` 的 Python 中间层），全市场加载再提速约 40%（冷启动约 9.6s、热缓存约 5.4s）；⑤ `load_bars_many` 磁盘缓存（parquet）：全市场日线（约 900 万行）首次加载后落盘 `data/bars_cache.parquet`（价格/量列用 float32 省内存），二次回测/扫描命中缓存秒开（全市场预计 40–60s → 2–3s，约 20 倍）；盘后 `update_daily` 写库后按数据库文件 mtime 自动失效，加载标的数 ≥500 才写缓存。
 
@@ -170,7 +191,38 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 CLI 传多策略用逗号分隔，例如 `--strategy "lab:箱体突破,lab:超跌反弹"`；不传则读取看板保存的选择
 （`system_settings.active_strategy`），都没有时兜底运行全部「已启用」的自定义策略。
 
-> **涨停不追过滤**：信号生成（`SignalService.generate`）后、落库与推送前，统一剔除「信号日当天已涨停」的标的（收盘价达到板块涨停价：主板 10% / 创业·科创板 20% / 北交所 30%）。原因：连板妖股信号日已涨停，次日晨间撮合往往撞涨停板买不进，属无效信号；过滤后不再追这类标的。仅对「当日涨停」做过滤，不误伤涨停回马枪（其信号日是回调后的放量阳线、非涨停日）。
+> **涨停不追过滤（仅作用于买入）**：信号生成（`SignalService.generate`）后、落库与推送前，剔除**买入**信号中「信号日当天已涨停」的标的（收盘价达到板块涨停价：主板 10% / 创业·科创板 20% / 北交所 30%）。原因：连板妖股信号日已涨停，次日晨间撮合往往撞涨停板买不进，属无效信号；不误伤涨停回马枪（其信号日是回调后的放量阳线、非涨停日）。
+>
+> **卖出信号一律放行**：持仓股当天涨停（或跌停）时，卖出正是止盈/止损的时机；早期版本对**所有**信号统一过滤，会把这类卖出信号吞掉 —— 这是个会让止盈止损静默失效的陷阱。
+
+### 策略参数优化与多年复验
+
+`scripts/optimize_strategies.py` 按「市场风格 + 全市场真实回测」优化策略参数，**默认只预演**、`--apply` 才写入（按策略名关键词匹配，只改指定字段）：
+
+```powershell
+python scripts/optimize_strategies.py            # 预演：打印每个策略的优化说明与改动
+python scripts/optimize_strategies.py --apply    # 写入 signal_strategies 表
+```
+
+> **核心教训：1 年样本的参数优化极易过拟合，必须用多年区间复验。** 实测同一批优化里：
+> - 「主升浪加 8% 硬止损」在 1 年样本显示由亏转盈（-18.6% → +12.0%），**3 年复验却是 +19.3% → +10.4%**
+>   （止损被反复触发，交易数 101 → 201 笔，成本与回撤双升）→ **该改动已撤回**；
+> - 只有「箱体突破 `vol_ratio` 2.0 → 1.5」经受住复验：3 年**年化持平（+19.6% → +19.8%）、回撤 20.8% → 14.5%**。
+
+**3 年复验结果**（2023-09 ~ 2026-08，全市场 5217 只，前复权）：
+
+| 策略 | 年化 | 回撤 | 胜率 | 笔数 |
+|---|---|---|---|---|
+| 箱体突破·放量确认（`vol_ratio` 优化后） | +19.82% | 14.54% | 41.5% | 106 |
+| 超跌反弹·量比确认 | +13.47% | 15.77% | 36.5% | 137 |
+| 主升浪·启动突破 | +19.26% | 22.72% | 45.5% | 101 |
+| 涨停回马枪·冲高回调低吸 | +7.78% | -5.56% | 62.5% | 32 |
+| 短线人气·热度共振 | -21.79% | -51.07% | 30.0% | 20 |
+
+> 涨停回马枪 3 年 +7.78% / 回撤 -5.56% / 胜率 62.5%，与下文「多策略组合回测」记录的历史结果
+> （年化 8.79% / 回撤 5.56% / 胜率 62.5%）吻合 —— 可交叉验证回测链路口径正确。
+> 其中**短线人气·热度共振是盘中实时型**（人气榜无法历史回填），日线近似回测系统性偏追涨，
+> **其回测数字不可用于调参**，应按模拟盘信号记录验证。
 
 ## 短线情绪策略（人气热度共振 × 涨停回马枪）
 
@@ -216,6 +268,7 @@ python scripts/fetch_hist_data.py --start 2020-01-01 --end 2026-08-28   # 拉全
 python scripts/backtest_compare.py              # 基线 vs 优化对比
 python scripts/scan_pullback_params.py          # 止损/止盈/信号参数扫描
 python scripts/walk_forward.py                  # 涨停回马枪滚动样本外验证
+python scripts/optimize_strategies.py           # 按市场风格优化策略参数（默认预演，--apply 写入）
 ```
 
 `fetch_hist_data.py` 走 Tushare 接口（`.env` 的 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL` 第三方代理），按交易日批量拉取并做前复权，流式写入独立库 `data/ashare_quant_hist.db`，不污染默认演示库。**股票列表拉取「上市 + 退市」两类**（修复幸存者偏差，`stock_basic` 表含 `delist_date` 字段），退市股按「退市日前最后交易日」补拉前复权基准。凭据**优先读环境变量**（兼容 Docker `env_file` 注入，容器内无 `.env` 文件），其次读 `.env` 文件。接口限流（如「请求速度过快」）会自动退避重试（最多 5 次）；仍触发时把 `--workers` 降到 `1`（串行）。
@@ -504,7 +557,9 @@ docker exec ashare-quant-scheduler-1 python scripts/fetch_hist_data.py --start 2
 python -m pytest -q
 ```
 
-测试使用临时 SQLite 和演示行情，覆盖费用/整手/涨停规则、信号到模拟成交，以及 Backtrader 回测落库。
+测试使用临时 SQLite 和演示行情，覆盖：费用/整手/涨停规则、信号到模拟成交、Backtrader 回测落库，
+以及**多策略并行**的独立买卖与止损止盈（`tests/test_multi_strategy.py`：策略只平自己买入的仓、
+同股只买一次、跨策略名额分配、涨停过滤只作用于买入、建仓记账、旧库迁移、策略解析兜底）。
 
 ## 生产部署检查
 
