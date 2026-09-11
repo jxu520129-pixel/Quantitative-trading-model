@@ -1,4 +1,24 @@
 # 内置调度器的替代方案，请勿与内置调度器同时运行。
-35 9 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli execute-orders >> logs/cron.log 2>&1
-20 15 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli after-close >> logs/cron.log 2>&1
-35 15 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli end-of-day >> logs/cron.log 2>&1
+# 时点与 config/default.yaml 的 scheduler 保持一致。
+#
+# 注意：盘中 intraday-trade 是模拟盘**买点的唯一入口**（实时价扫描、当天即时成交）。
+# 缺了这几行就不会有任何买入——旧的「收盘排队、次日开盘买入」路径已废弃，
+# execute-orders 现在只负责开盘前结算（T+1 解锁可卖数量 + 风控日内重置）。
+#
+# 本机时区须为 Asia/Shanghai（cron 按服务器本地时间触发）。
+
+# 开盘前结算：T+1 可卖数量解锁 + 风控日内状态重置（须早于当日第一次盘中交易）
+26 9 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli execute-orders >> logs/cron.log 2>&1
+
+# 盘中即时交易：实时价扫描 → 先卖后买即时成交（5 个时点）
+37 9 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
+0 10 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
+30 10 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
+30 14 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
+50 14 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
+
+# 盘后：更新日线 → 买点扫描（仅回顾）→ 按当日收盘价离场
+30 15 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli after-close >> logs/cron.log 2>&1
+
+# 收盘估值与风控
+50 15 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli end-of-day >> logs/cron.log 2>&1
