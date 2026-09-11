@@ -639,20 +639,46 @@ def describe_exit(exit_config: dict[str, Any]) -> str:
 
 
 def fetch_scan_quotes(data_service: Any, database: Any) -> dict[str, dict[str, float]]:
-    """刷新全市场实时快照并读取 {code: {price, volume}}，供盘中买点扫描覆盖最新价与当日成交量。"""
+    """刷新全市场实时快照并读取 {code: {price, volume, quote_time}}，供盘中买点扫描覆盖最新价与当日成交量。"""
     universe = data_service.eligible_universe(limit=int(data_service.settings.data["strategy_scan_symbols"]))
     try:
         data_service.refresh_quotes(universe["code"].tolist())
     except Exception as error:
         LOG.warning("盘中实时行情刷新失败：%s", error)
     quotes: dict[str, dict[str, float]] = {}
-    for q in database.query_all("SELECT code, price, volume FROM market_quotes WHERE price>0"):
+    for q in database.query_all("SELECT code, price, volume, quote_time FROM market_quotes WHERE price>0"):
         price = float(q["price"] or 0)
         if price <= 0:
             continue
         volume = float(q["volume"] or 0)
-        quotes[str(q["code"])] = {"price": price, "volume": volume if volume > 0 else 0.0}
+        quotes[str(q["code"])] = {
+            "price": price,
+            "volume": volume if volume > 0 else 0.0,
+            "quote_time": str(q["quote_time"] or ""),
+        }
     return quotes
+
+
+def fresh_quotes(quotes: dict[str, Any] | None, day: str) -> dict[str, Any]:
+    """只保留 ``quote_time`` 落在 ``day`` 当天的实时行情。
+
+    ``market_quotes`` 表按 code 覆盖写入、**不会自动过期**：某只标的今天刷新失败时会残留上一次
+    的价格。若不加过滤，盘中扫描与下单会把**陈旧价当成实时价**用（报告还会把它标成「实时」）。
+    因此「实时行情是否可用」必须以 ``quote_time`` 是否为当日为准，而不是「有没有价格」。
+    """
+    if not quotes:
+        return {}
+    prefix = str(day)[:10]
+    fresh: dict[str, Any] = {}
+    for code, value in quotes.items():
+        if not isinstance(value, dict):
+            continue
+        if not str(value.get("quote_time") or "").startswith(prefix):
+            continue
+        if float(value.get("price") or 0) <= 0:
+            continue
+        fresh[code] = value
+    return fresh
 
 
 def find_buy_candidates(
@@ -749,6 +775,8 @@ def find_buy_candidates(
                 matches.append({
                     "code": code, "name": name, "price": round(price, 2),
                     "price_date": price_date,
+                    # 当日成交额（盘中为当日累计、盘后为全日）：盘中下单排序时用作流动性依据
+                    "amount": round(float(frame["amount"].iloc[-1]), 2),
                     "factors": {fn: round(float(factor_values[fn].iloc[-1]), 4) for fn in exprs},
                 })
         results.append({
@@ -1206,24 +1234,39 @@ def filter_candidates_by_metrics(
     return filtered
 
 
-def build_buy_report(data_service: Any, database: Any, current_quotes: dict[str, float] | None = None, strategy_names: list[str] | None = None, exclude_prefix: str | None = None) -> tuple[bool, str, str]:
-    """完整买点扫描报告：扫描 + 板块涨跌 + 公司公告 + 所属行业 + 质量过滤。
+def scan_buy_candidates(
+    data_service: Any,
+    database: Any,
+    current_quotes: dict[str, Any] | None = None,
+    strategy_names: list[str] | None = None,
+    exclude_prefix: str | None = None,
+) -> dict[str, Any]:
+    """扫描 + 全部质量过滤后的买入候选（买点报告与盘中实际下单**共用同一口径**）。
 
-    返回 (是否有候选, 纯文本报告, HTML 报告)。无候选时不拉取外部公告/板块数据。
+    返回 ``{"candidates", "notices", "sector", "sector_changes", "industries", "rejected_by"}``。
+    ``candidates`` 是 ``find_buy_candidates`` 的原结构（``[{"strategy","entry_desc","exit_desc","matches"}]``），
+    已剔除价格区间 / 流动性 / 板块弱势 / 负面公告 / 非热股 / 财务指标不符的标的；
+    ``rejected_by`` 非空表示候选被某一道过滤清空（其文案原样用于邮件报告）。
+
+    把「扫描候选」与「格式化报告」拆开的原因：盘中即时下单必须买**报告里展示的那批股票**，
+    否则会出现「邮件里没有、账户却买了」的口径不一致。
     """
     scan_cfg = data_service.settings.raw.get("scan", {})
-    max_price = float(scan_cfg.get("max_price", 0) or 0) or None
-    min_price = float(scan_cfg.get("min_price", 0) or 0) or None
-    min_average_amount = float(scan_cfg.get("min_average_amount", 0) or 0) or None
-    min_average_volume = float(scan_cfg.get("min_average_volume", 0) or 0) or None
-    max_per_strategy = int(scan_cfg.get("max_per_strategy", 10))
     candidates = find_buy_candidates(
-        data_service, database, current_quotes=current_quotes, max_price=max_price,
-        min_price=min_price, min_average_amount=min_average_amount, min_average_volume=min_average_volume,
+        data_service, database, current_quotes=current_quotes,
+        max_price=float(scan_cfg.get("max_price", 0) or 0) or None,
+        min_price=float(scan_cfg.get("min_price", 0) or 0) or None,
+        min_average_amount=float(scan_cfg.get("min_average_amount", 0) or 0) or None,
+        min_average_volume=float(scan_cfg.get("min_average_volume", 0) or 0) or None,
         strategy_names=strategy_names, exclude_prefix=exclude_prefix,
     )
+    result: dict[str, Any] = {
+        "candidates": candidates, "notices": {}, "sector": "", "sector_changes": {},
+        "industries": {}, "rejected_by": "",
+    }
     if not any(item["matches"] for item in candidates):
-        return False, "今日无符合条件的买入候选（或没有买得起价格的候选）", ""
+        result["rejected_by"] = "今日无符合条件的买入候选（或没有买得起价格的候选）"
+        return result
     codes = sorted({m["code"] for item in candidates for m in item["matches"]})
     notices = fetch_recent_notices()
     sector, sector_changes = fetch_sector_summary()
@@ -1234,10 +1277,39 @@ def build_buy_report(data_service: Any, database: Any, current_quotes: dict[str,
     metric_keys = ("min_turnover", "max_pe", "min_market_cap")
     if any(float(scan_cfg.get(k, 0) or 0) > 0 for k in metric_keys):
         candidates = filter_candidates_by_metrics(candidates, fetch_stock_metrics(), data_service.settings)
+    result.update({
+        "candidates": candidates, "notices": notices, "sector": sector,
+        "sector_changes": sector_changes, "industries": industries,
+    })
     if not any(item["matches"] for item in candidates):
-        return False, "候选均被质量过滤排除（板块弱势 / 负面公告 / 非热股 / 指标不符）", ""
-    text = format_buy_report(candidates, notices=notices, industries=industries, sector_changes=sector_changes, max_per_strategy=max_per_strategy)
-    if sector:
-        text = sector + "\n\n" + text
-    html = format_buy_report_html(candidates, notices=notices, industries=industries, max_per_strategy=max_per_strategy, sector_changes=sector_changes, sector_text=sector)
+        result["rejected_by"] = "候选均被质量过滤排除（板块弱势 / 负面公告 / 非热股 / 指标不符）"
+    return result
+
+
+def build_buy_report(data_service: Any, database: Any, current_quotes: dict[str, float] | None = None, strategy_names: list[str] | None = None, exclude_prefix: str | None = None, scan: dict[str, Any] | None = None) -> tuple[bool, str, str]:
+    """完整买点扫描报告：扫描 + 板块涨跌 + 公司公告 + 所属行业 + 质量过滤。
+
+    返回 (是否有候选, 纯文本报告, HTML 报告)。无候选时不拉取外部公告/板块数据。
+    ``scan`` 可传入 ``scan_buy_candidates()`` 的现成结果复用——盘中即时交易需要先按候选下单、
+    再格式化同一份候选做推送，传入即可避免对全市场重复扫描两遍。
+    """
+    if scan is None:
+        scan = scan_buy_candidates(
+            data_service, database, current_quotes=current_quotes,
+            strategy_names=strategy_names, exclude_prefix=exclude_prefix,
+        )
+    if scan["rejected_by"]:
+        return False, scan["rejected_by"], ""
+    max_per_strategy = int(data_service.settings.raw.get("scan", {}).get("max_per_strategy", 10))
+    text = format_buy_report(
+        scan["candidates"], notices=scan["notices"], industries=scan["industries"],
+        sector_changes=scan["sector_changes"], max_per_strategy=max_per_strategy,
+    )
+    if scan["sector"]:
+        text = scan["sector"] + "\n\n" + text
+    html = format_buy_report_html(
+        scan["candidates"], notices=scan["notices"], industries=scan["industries"],
+        max_per_strategy=max_per_strategy, sector_changes=scan["sector_changes"],
+        sector_text=scan["sector"],
+    )
     return True, text, html

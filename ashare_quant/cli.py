@@ -15,7 +15,7 @@ from .hot_strategy import run_hot_backtest
 from .lab import build_buy_report, fetch_scan_quotes
 from .limit_pullback_strategy import run_limit_pullback_backtest
 from .main_rally import generate_main_rally_report, score_main_rally_candidates
-from .scheduler import after_close, end_of_day, run_scheduler
+from .scheduler import after_close, end_of_day, intraday_trade, run_scheduler
 from .presentation import localize_payload
 from .services.runtime import build_runtime
 from .services.trading import next_weekday
@@ -88,13 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     signals.add_argument("--date")
     queue = sub.add_parser("queue-orders", help="将新信号转换为模拟委托")
     queue.add_argument("--date")
-    execute = sub.add_parser("execute-orders", help="执行模拟盘晨间成交流程")
+    execute = sub.add_parser("execute-orders", help="开盘前结算：T+1 解锁可卖数量并撮合遗留委托")
     execute.add_argument("--date", default=today_text())
     execute.add_argument("--no-quotes", action="store_true", help="不刷新实时行情，使用缓存或演示日线数据")
     sub.add_parser("paper-demo", help="按需生成数据、信号、委托并完成一次离线模拟成交")
     sub.add_parser("status", help="输出当前模拟账户、持仓与风控状态")
-    sub.add_parser("scheduler", help="启动长期运行的定时调度器（盘前 09:25/晨间 09:35/盘后 15:30/收盘 15:50/重训 16:10）")
-    sub.add_parser("after-close", help="执行一次 15:30 行情更新、信号和委托排队流程")
+    sub.add_parser("scheduler", help="启动长期运行的定时调度器（盘前 09:25/盘中即时交易 5 个时点/盘后 15:30/收盘 15:50/重训 16:10）")
+    sub.add_parser("intraday-trade", help="执行一次盘中即时交易：实时价扫描买卖并当天成交")
+    sub.add_parser("after-close", help="执行一次 15:30 行情更新、买点扫描与收盘价离场流程")
     sub.add_parser("end-of-day", help="执行一次 15:50 收盘估值与风控流程")
     sub.add_parser("update-fundamentals", help="采集事件库与宏观数据（主升浪策略基础层）")
     sub.add_parser("pre-market", help="盘前流程：抓事件+宏观+候选池+富文本报告")
@@ -154,6 +155,13 @@ def main() -> None:
         print_json(runtime.trading.queue_new_signals(args.date))
     elif args.command == "execute-orders":
         print_json(runtime.trading.execute_morning(args.date, not args.no_quotes))
+    elif args.command == "intraday-trade":
+        intraday_trade(runtime)
+        print_json({
+            "status": "盘中即时交易已完成",
+            "account": runtime.broker.get_account(),
+            "positions": len(runtime.broker.get_positions()),
+        })
     elif args.command == "paper-demo":
         if not runtime.data.has_data():
             seed_demo_market(runtime.database, runtime.data)

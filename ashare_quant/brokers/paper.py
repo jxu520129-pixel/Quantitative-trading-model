@@ -68,8 +68,18 @@ class PaperBroker(Broker):
             self.database.execute("UPDATE positions SET sellable_quantity=quantity,updated_at=?", (utc_now_text(),))
             self.risk.reset_for_new_day(trade_date)
 
-    def execute_pending_orders(self, trade_date: str) -> dict[str, int]:
-        """撮合当日待执行委托（卖出优先）：涨跌停拦截、逐笔成交/拒绝/失败，返回统计。"""
+    def execute_pending_orders(
+        self,
+        trade_date: str,
+        price_overrides: dict[str, float] | None = None,
+        filled_at: str | None = None,
+    ) -> dict[str, int]:
+        """撮合当日待执行委托（卖出优先）：涨跌停拦截、逐笔成交/拒绝/失败，返回统计。
+
+        ``price_overrides`` 为 ``{code: 成交价}``：盘中即时交易传入**实时价**、盘后固定价格
+        交易时段传入**当日收盘价**；不传时沿用日线开盘价（旧的「次日开盘撮合」口径）。
+        ``filled_at`` 为成交时间字符串，盘中成交传入真实时刻，避免在成交流水里写死 09:30。
+        """
         trade_date = normalize_date(trade_date)
         rows = self.database.query_all(
             "SELECT * FROM orders WHERE status='PENDING' AND trade_date<=? ORDER BY CASE side WHEN 'SELL' THEN 0 ELSE 1 END,created_at",
@@ -91,25 +101,29 @@ class PaperBroker(Broker):
                     "SELECT close AS open,pre_close,trade_date FROM daily_bars WHERE code=? ORDER BY trade_date DESC LIMIT 1",
                     (order["code"],),
                 )
+            override = (price_overrides or {}).get(order["code"])
+            if override is not None and float(override) > 0:
+                # 指定成交价（实时价 / 收盘价）：保留行情里的 pre_close 用于涨跌停拦截
+                bar = {**(dict(bar) if bar else {}), "open": float(override)}
             if not bar:
                 self._reject(order, "没有可用于成交的行情数据")
                 outcome["rejected"] += 1
                 continue
             try:
-                if at_limit(float(bar["open"]), bar["pre_close"], order["code"], order["side"]):
-                    pre_close = float(bar["pre_close"])
+                if at_limit(float(bar["open"]), bar.get("pre_close"), order["code"], order["side"]):
+                    pre_close = float(bar.get("pre_close") or 0)
                     open_price = float(bar["open"])
                     limit_pct = board_price_limit(order["code"], is_st=False)
                     if order["side"] == "BUY":
                         limit_price = round(pre_close * (1 + limit_pct), 2)
-                        detail = (f"涨停拦截 {order['code']}：开盘价{open_price:.2f} ≥ 涨停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}涨停）")
+                        detail = (f"涨停拦截 {order['code']}：成交价{open_price:.2f} ≥ 涨停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}涨停）")
                     else:
                         limit_price = round(pre_close * (1 - limit_pct), 2)
-                        detail = (f"跌停拦截 {order['code']}：开盘价{open_price:.2f} ≤ 跌停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}跌停）")
+                        detail = (f"跌停拦截 {order['code']}：成交价{open_price:.2f} ≤ 跌停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}跌停）")
                     self._reject(order, detail)
                     outcome["rejected"] += 1
                     continue
-                self._fill(order, bar, trade_date)
+                self._fill(order, bar, trade_date, filled_at=filled_at)
                 self.risk.record_success()
                 outcome["filled"] += 1
             except ValueError as error:
@@ -124,8 +138,10 @@ class PaperBroker(Broker):
         self.mark_to_market(trade_date)
         return outcome
 
-    def _fill(self, order: dict[str, Any], bar: dict[str, Any], trade_date: str) -> None:
-        """以含滑点的开盘价成交一笔委托：更新资金、持仓、成交记录（买/卖分别记账）。"""
+    def _fill(
+        self, order: dict[str, Any], bar: dict[str, Any], trade_date: str, filled_at: str | None = None
+    ) -> None:
+        """以含滑点的成交价成交一笔委托：更新资金、持仓、成交记录（买/卖分别记账）。"""
         side = order["side"]
         raw_price = float(bar["open"])
         price = raw_price * (1 + self.costs.slippage_rate if side == "BUY" else 1 - self.costs.slippage_rate)
@@ -213,7 +229,8 @@ class PaperBroker(Broker):
             conn.execute(
                 """INSERT INTO fills(order_id,code,side,quantity,price,gross_amount,commission,stamp_duty,filled_at)
                    VALUES(?,?,?,?,?,?,?,?,?)""",
-                (order["id"], order["code"], side, quantity, price, amount, commission, stamp_duty, market_open_fill_time(trade_date, order["id"])),
+                (order["id"], order["code"], side, quantity, price, amount, commission, stamp_duty,
+                 filled_at or market_open_fill_time(trade_date, order["id"])),
             )
 
     def _reject(self, order: dict[str, Any], message: str) -> None:

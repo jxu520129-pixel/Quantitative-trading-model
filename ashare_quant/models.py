@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -129,3 +129,14 @@ def market_open_fill_time(trade_date: str, order_id: str) -> str:
     base = (trade_date or "")[:10] or datetime.now().strftime("%Y-%m-%d")
     second = hashlib.md5((order_id or "").encode("utf-8")).digest()[0] % 60
     return f"{base} 09:30:{second:02d}"
+
+
+def intraday_fill_time(trade_date: str, moment: datetime | None = None) -> str:
+    """为**盘中即时成交**生成真实成交时刻 ``YYYY-MM-DD HH:MM:SS``（北京时间）。
+
+    盘中扫描改在 09:37/10:00/10:30/14:30/14:50 以实时价成交，成交时间必须反映当时的
+    时点，不能再写死 09:30（那会让人误以为还是次日开盘撮合）。
+    """
+    moment = moment or datetime.now(timezone(timedelta(hours=8)))
+    base = (trade_date or "")[:10] or moment.strftime("%Y-%m-%d")
+    return f"{base} {moment.strftime('%H:%M:%S')}"

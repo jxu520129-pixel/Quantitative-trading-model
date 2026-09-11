@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from . import ml_model
 from .fundamental import update_fundamentals
-from .lab import build_buy_report, fetch_scan_quotes
+from .lab import build_buy_report, fetch_scan_quotes, fresh_quotes, scan_buy_candidates
 from .main_rally import generate_daily_events_report, generate_main_rally_report
 from .services.runtime import Runtime, build_runtime
 from .utils import today_text
 
 
 LOG = logging.getLogger(__name__)
+
+# 盘中即时交易时点（09:25 集合竞价结束后开始，15:00 收盘前结束）。
+# 15:05–15:30 是盘后固定价格交易时段，只能按当日收盘价成交、拿不到盘中实时价，
+# 因此不作为买入时点（见 ``after_close`` 的收盘价离场）。
+DEFAULT_INTRADAY_TIMES = ("09:37", "10:00", "10:30", "14:30", "14:50")
 
 
 def _skip_if_holiday(runtime: Runtime, label: str) -> bool:
@@ -27,8 +31,34 @@ def _skip_if_holiday(runtime: Runtime, label: str) -> bool:
     return True
 
 
+def _live_quotes(runtime: Runtime) -> dict:
+    """取当日刷新成功的实时行情（剔除 market_quotes 里的残留旧价）。"""
+    return fresh_quotes(fetch_scan_quotes(runtime.data, runtime.database), today_text())
+
+
+def _intraday_summary(outcome: dict) -> str:
+    """把盘中撮合结果格式化成一行中文摘要。"""
+    if outcome.get("skipped"):
+        return "本次未成交：实时行情不可用。"
+    buys = f"买入成交 {outcome['buy_filled']} 笔"
+    sells = f"卖出成交 {outcome['sell_filled']} 笔"
+    if outcome["buy_rejected"] or outcome["sell_rejected"]:
+        detail = f"（买入被拒 {outcome['buy_rejected']}、卖出被拒 {outcome['sell_rejected']}）"
+    else:
+        detail = ""
+    if outcome["failed"]:
+        detail += f"（执行失败 {outcome['failed']}）"
+    tail = "。" if (outcome["buy_filled"] or outcome["sell_filled"]) else "，本次无成交。"
+    return f"本次盘中即时撮合：{buys}、{sells}{detail}{tail}"
+
+
 def after_close(runtime: Runtime) -> None:
-    """盘后流程（signal_generation 时点）：更新日线 → 买点扫描 → 生成并排队次日信号。"""
+    """盘后流程（signal_generation 时点）：更新日线 → 买点扫描 → 按收盘价即时离场。
+
+    买入已改为**盘中实时价即时成交**（见 ``intraday_trade``），因此这里**不再排队次日开盘买入**。
+    保留的是**收盘价离场**：15:05–15:30 为盘后固定价格交易时段，按当日收盘价成交，所以那些
+    不适合盘中实时判断的离场（如因子「离场条件」，需要用当日完整日线）在这里以收盘价执行。
+    """
     if _skip_if_holiday(runtime, "盘后流程"):
         return
     if not runtime.control.get_bool("strategy_enabled", True):
@@ -37,31 +67,52 @@ def after_close(runtime: Runtime) -> None:
     if not runtime.database.query_one("SELECT 1 FROM stock_basic LIMIT 1"):
         runtime.data.refresh_universe()
     update = runtime.data.update_daily()
-    # 数据完整性闸门：最新交易日覆盖率不足则推迟买点扫描与信号生成，避免推送过期收盘价
+    # 数据完整性闸门：最新交易日覆盖率不足则推迟买点扫描与离场，避免用过期收盘价误判
     if not runtime.data.daily_data_complete():
         runtime.notifications.send(
             "盘后流程推迟",
-            f"今日日线数据拉取不完整（更新结果={update}），买点扫描与信号生成已推迟，避免用过期价格推送。",
+            f"今日日线数据拉取不完整（更新结果={update}），买点扫描与收盘价离场已推迟，避免用过期价格推送。",
             "WARNING",
         )
-        LOG.warning("今日日线数据不完整（%s），推迟盘后买点扫描与信号生成", update)
+        LOG.warning("今日日线数据不完整（%s），推迟盘后买点扫描与离场", update)
         return
     has_candidates, buy_report, buy_html = build_buy_report(runtime.data, runtime.database, exclude_prefix="主升浪")
     if has_candidates:
-        runtime.notifications.send("买点扫描", buy_report, "INFO", html=buy_html)
+        note = "\n（提示：买入已在盘中按实时价即时成交，本条仅为收盘后候选回顾，不再触发次日开盘买入。）"
+        runtime.notifications.send("买点扫描（收盘后回顾）", buy_report + note, "INFO", html=buy_html)
         LOG.info("买点扫描：%s", buy_report.replace("\n", " / "))
-    strategy_name = runtime.control.get("active_strategy", runtime.settings.active_strategy)
-    if strategy_name == "momentum_rotation" and datetime.now().weekday() != int(runtime.settings.raw["scheduler"]["momentum_rebalance_weekday"]):
-        LOG.info("日线数据已更新，今日不是周度动量轮动调仓日")
+    # 收盘价离场：不传 current_quotes → 用当日完整日线（即收盘价）评估
+    held = [position.code for position in runtime.broker.get_positions()]
+    if not held:
+        LOG.info("盘后流程完成：更新结果=%s，当前无持仓，无需离场", update)
         return
-    signals = runtime.signals.generate(strategy_name=strategy_name)
-    queued = runtime.trading.queue_new_signals(signals[0].as_of_date if signals else None)
-    LOG.info("盘后流程完成：更新结果=%s，信号数量=%s，委托结果=%s", update, len(signals), queued)
+    exits = runtime.signals.generate(codes=held)
+    outcome = runtime.trading.execute_intraday(
+        quotes=_close_prices(runtime, held), candidates=[], exit_signals=exits,
+    )
+    LOG.info("盘后流程完成：更新结果=%s，收盘价离场=%s", update, outcome)
+
+
+def _close_prices(runtime: Runtime, codes: list[str]) -> dict[str, float]:
+    """取指定标的**当日**收盘价（盘后离场按收盘价成交）。"""
+    if not codes:
+        return {}
+    placeholders = ",".join("?" * len(codes))
+    rows = runtime.database.query_all(
+        f"SELECT code, close FROM daily_bars WHERE trade_date=? AND code IN ({placeholders})",
+        [today_text(), *codes],
+    )
+    return {row["code"]: float(row["close"]) for row in rows if float(row["close"] or 0) > 0}
 
 
 def morning_execution(runtime: Runtime) -> None:
-    """晨间成交（morning_execution 时点）：执行模拟盘当日待成交委托。"""
-    if _skip_if_holiday(runtime, "晨间成交"):
+    """开盘前结算（morning_execution 时点）：T+1 可卖数量重置 + 撮合遗留委托。
+
+    买入已改为盘中即时成交，这里**不再有新委托可执行**；保留该任务是因为 T+1 的
+    「昨日买入今日可卖」与风控「日内停止状态」重置都发生在 ``roll_to_new_day``，
+    必须在当日第一次盘中交易（09:37）之前完成。
+    """
+    if _skip_if_holiday(runtime, "开盘前结算"):
         return
     if not runtime.control.get_bool("paper_execution_enabled", True):
         LOG.info("看板已关闭模拟成交")
@@ -92,16 +143,51 @@ def retrain_model(runtime: Runtime) -> None:
         LOG.warning("主升概率模型重训失败（不影响交易流程）：%s", error)
 
 
-def intraday_buy_scan(runtime: Runtime) -> None:
-    """盘中买点扫描：用实时价与当日成交量覆盖最新 bar，只在有候选时发送邮件。"""
-    if _skip_if_holiday(runtime, "盘中买点扫描"):
+def intraday_trade(runtime: Runtime) -> None:
+    """盘中即时交易（每个 intraday_scan_times 时点）：实时价扫描 → 先卖后买即时成交 → 推送报告。
+
+    这是模拟盘**买点的唯一入口**：不再「15:30 生成信号 → 次日 09:26 按开盘价买入」，
+    发现候选的当下就以实时价成交。卖出同样即时（止损/止盈/移动止损/跌破箱体/离场条件），
+    不再等到次日开盘，避免止损滞后一天。
+
+    实时行情不可用（接口限流/网络异常/当日未刷新成功）时**跳过本次、不做任何成交**：
+    宁可当天不出手，也不拿陈旧价格成交。
+    """
+    if _skip_if_holiday(runtime, "盘中即时交易"):
         return
-    quotes = fetch_scan_quotes(runtime.data, runtime.database)
-    has_candidates, report, html = build_buy_report(runtime.data, runtime.database, current_quotes=quotes, exclude_prefix="主升浪")
-    if not has_candidates:
+    if not runtime.control.get_bool("strategy_enabled", True):
+        LOG.info("看板已关闭策略运行")
         return
-    runtime.notifications.send("盘中买点扫描", report, "INFO", html=html)
-    LOG.info("盘中买点扫描发现候选：%s", report.replace("\n", " / "))
+    if not runtime.control.get_bool("paper_execution_enabled", True):
+        LOG.info("看板已关闭模拟成交")
+        return
+    quotes = _live_quotes(runtime)
+    if not quotes:
+        runtime.notifications.send(
+            "盘中交易跳过",
+            "实时行情不可用（接口限流 / 网络异常 / 当日未刷新成功），本次不做任何成交，等待下一个盘中时点重试。",
+            "WARNING",
+        )
+        LOG.warning("实时行情不可用，跳过本次盘中即时交易")
+        return
+    scan = scan_buy_candidates(
+        runtime.data, runtime.database, current_quotes=quotes, exclude_prefix="主升浪"
+    )
+    held = [position.code for position in runtime.broker.get_positions()]
+    exits = runtime.signals.generate(current_quotes=quotes, codes=held) if held else []
+    outcome = runtime.trading.execute_intraday(
+        quotes=quotes, candidates=scan["candidates"], exit_signals=exits,
+    )
+    summary = _intraday_summary(outcome)
+    LOG.info("盘中即时交易：%s；%s", outcome, summary)
+    has_candidates, report, html = build_buy_report(runtime.data, runtime.database, scan=scan)
+    if has_candidates:
+        runtime.notifications.send(
+            "盘中买点扫描", f"{report}\n\n{summary}", "INFO",
+            html=f'{html}<p style="margin:10px 0 0;font-size:12.5px;color:#2c3e50;">{summary}</p>',
+        )
+    elif outcome["buy_filled"] or outcome["sell_filled"]:
+        runtime.notifications.send("盘中即时成交", summary, "INFO")
 
 
 def pre_market_scan(runtime: Runtime) -> None:
@@ -110,9 +196,10 @@ def pre_market_scan(runtime: Runtime) -> None:
         return
     # 抓取全球事件（LLM 抽取）+ 更新宏观状态
     update_fundamentals(runtime.database)
-    # 拉取集合竞价实时行情（保证报告里的价格是当日而非过时的历史 bar）
+    # 拉取集合竞价实时行情（保证报告里的价格是当日而非过时的历史 bar）；
+    # 只保留当日刷新成功的行情，拉取失败时回退为日线收盘价并在报告里标注数据日期。
     try:
-        quotes = fetch_scan_quotes(runtime.data, runtime.database)
+        quotes = _live_quotes(runtime)
     except Exception:
         LOG.exception("盘前集合竞价行情拉取失败，回退到日线收盘价")
         quotes = {}
@@ -150,14 +237,18 @@ def run_scheduler(config_path: str | None = None) -> None:
     scheduler.add_job(after_close, CronTrigger(day_of_week="mon-sun", hour=signal_h, minute=signal_m, timezone=timezone), args=[runtime], id="after_close")
     scheduler.add_job(end_of_day, CronTrigger(day_of_week="mon-sun", hour=eod_h, minute=eod_m, timezone=timezone), args=[runtime], id="end_of_day")
     scheduler.add_job(retrain_model, CronTrigger(day_of_week="mon-sun", hour=retrain_h, minute=retrain_m, timezone=timezone), args=[runtime], id="retrain_model")
-    for hour, minute in ((9, 37), (10, 00), (10, 30), (14, 30), (14, 50), (15, 30)):
+    # 盘中即时交易：模拟盘买点的唯一入口（实时价成交，不再次日开盘买入）
+    intraday_times = tuple(str(t) for t in (sched_cfg.get("intraday_scan_times") or DEFAULT_INTRADAY_TIMES))
+    for moment in intraday_times:
+        hour, minute = _parse_hhmm(moment)
         scheduler.add_job(
-            intraday_buy_scan,
+            intraday_trade,
             CronTrigger(day_of_week="mon-sun", hour=hour, minute=minute, timezone=timezone),
-            args=[runtime], id=f"buy_scan_{hour}_{minute}",
+            args=[runtime], id=f"intraday_trade_{hour:02d}{minute:02d}",
         )
     LOG.info(
-        "定时调度器已启动，时区=%s；晨间成交=%02d:%02d，盘后信号=%02d:%02d，收盘估值=%02d:%02d，模型重训=%02d:%02d",
-        timezone, morning_h, morning_m, signal_h, signal_m, eod_h, eod_m, retrain_h, retrain_m,
+        "定时调度器已启动，时区=%s；盘中即时交易=%s，晨间结算=%02d:%02d，盘后离场=%02d:%02d，收盘估值=%02d:%02d，模型重训=%02d:%02d",
+        timezone, ",".join(intraday_times), morning_h, morning_m, signal_h, signal_m,
+        eod_h, eod_m, retrain_h, retrain_m,
     )
     scheduler.start()

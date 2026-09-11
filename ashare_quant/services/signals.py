@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..config import Settings
 from ..data.service import DataService
 from ..database import Database
@@ -11,6 +13,33 @@ from ..notifications import NotificationHub
 from ..presentation import label_value
 from ..strategies import build_strategy
 from ..strategies.base import StrategyContext
+
+
+def apply_realtime_quotes(
+    bars_by_code: dict[str, Any], current_quotes: dict[str, Any] | None
+) -> dict[str, Any]:
+    """用实时价覆盖每只标的最新一根 bar 的 ``close``（及当日累计成交量）。
+
+    与 ``lab.find_buy_candidates`` 完全相同的口径，保证盘中「离场判断」与「买点扫描」
+    看到的是同一个价格。改动仅作用于最后一根 bar，历史序列不动。
+    """
+    if not current_quotes:
+        return bars_by_code
+    updated: dict[str, Any] = {}
+    for code, frame in bars_by_code.items():
+        quote = current_quotes.get(code)
+        price, volume = 0.0, 0.0
+        if isinstance(quote, dict):
+            price, volume = float(quote.get("price") or 0), float(quote.get("volume") or 0)
+        elif quote is not None:
+            price = float(quote or 0)
+        if price > 0 and frame is not None and not frame.empty:
+            frame = frame.copy()
+            frame.iloc[-1, frame.columns.get_loc("close")] = price
+            if volume > 0:
+                frame.iloc[-1, frame.columns.get_loc("volume")] = volume
+        updated[code] = frame
+    return updated
 
 
 class SignalService:
@@ -47,22 +76,41 @@ class SignalService:
         ]
 
     # ------------------------------------------------------------------ 主流程
-    def generate(self, as_of_date: str | None = None, strategy_name: str | None = None) -> list[Signal]:
+    def generate(
+        self,
+        as_of_date: str | None = None,
+        strategy_name: str | None = None,
+        current_quotes: dict[str, Any] | None = None,
+        codes: list[str] | None = None,
+    ) -> list[Signal]:
         """对当前候选池运行选中的一个或多个策略，生成并落库调仓信号。
 
         多策略并行时的合并规则：**卖出信号全部保留**（每个策略只管自己买入的持仓，
         各自独立止盈止损），**买入信号跨策略统一排序**后按剩余持仓名额截取，
         保证总持仓不超过 ``max_positions``（多策略共享总名额）。
+
+        ``current_quotes`` 为 ``{code: 实时价}`` 或 ``{code: {"price","volume"}}``：传入时
+        用实时价覆盖最新一根 bar 的收盘价，使**买卖判断都在实时价上做**（盘中即时交易用）。
+        ``codes`` 限定只跑这些标的，用于「只评估持仓离场」——此时不会产出买入信号
+        （持仓已在 ``held_codes`` 里被排除），开销也从全市场降到几只有仓股。
         """
         strategy_names = self.resolve_strategy_names(strategy_name)
         if not strategy_names:
             raise RuntimeError("未选择任何策略，请先在看板「策略」中至少选择一个")
+        if codes is not None and not codes:
+            return []  # 无持仓时「只评估离场」应为空，避免误报「证券池为空」
 
         universe = self.data.eligible_universe(limit=int(self.settings.data["strategy_scan_symbols"]))
+        if codes is not None:
+            wanted = {str(code) for code in codes}
+            universe = universe[universe["code"].isin(wanted)].reset_index(drop=True)
         if universe.empty:
             raise RuntimeError("可用证券池为空，请先更新数据或生成演示行情")
-        bars_by_code = self.data.load_bars_many(
-            universe["code"].tolist(), start_date=self.data.lookback_start(260), end_date=as_of_date
+        bars_by_code = apply_realtime_quotes(
+            self.data.load_bars_many(
+                universe["code"].tolist(), start_date=self.data.lookback_start(260), end_date=as_of_date
+            ),
+            current_quotes,
         )
         latest_dates = [frame["trade_date"].iloc[-1].date().isoformat() for frame in bars_by_code.values()]
         if not latest_dates:
