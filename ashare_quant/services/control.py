@@ -32,3 +32,17 @@ class SystemControl:
                ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
             (key, value, utc_now_text()),
         )
+
+    def migrate_dashboard_refresh(self, default_seconds: int = 30) -> None:
+        """把看板「浮动盈亏刷新间隔」从**旧默认 10 秒**一次性升级到新的默认值。
+
+        该键（``holdings_refresh_seconds``）在看板每次打开时都会被自动写回，
+        所以老库里存的 ``10`` 多半不是用户主动选的、而是旧默认值落库的结果。
+        用 ``holdings_refresh_version`` 做版本标记，保证只迁移一次——
+        迁移后用户自己选的值不会再被覆盖（包括他主动选回 10 秒）。
+        """
+        if self.get("holdings_refresh_version", "") == "2":
+            return
+        if self.get("holdings_refresh_seconds", "") in ("", "10"):
+            self.set("holdings_refresh_seconds", str(default_seconds))
+        self.set("holdings_refresh_version", "2")

@@ -273,3 +273,61 @@ def test_builtin_strategy_templates():
         factors = [c["factor"] for c in entry["conditions"]] + [c["factor"] for c in exit_.get("conditions", [])]
         for factor in factors:
             assert factor in BUILTIN_FACTOR_FORMULAS, f"{name} 引用了未定义因子 {factor}"
+
+
+def test_dashboard_refresh_interval_persists(tmp_path: Path):
+    """看板刷新间隔存 system_settings，跨「重新登录」（新进程 = 新 SystemControl）仍沿用。"""
+    from ashare_quant.services.control import SystemControl
+
+    _settings, database, _data, _broker, _signals, _trading = make_services(tmp_path)
+    assert SystemControl(database).get("holdings_refresh_seconds", "") == ""
+
+    SystemControl(database).set("holdings_refresh_seconds", "30")
+    # 新实例模拟重新打开看板/重启进程：值仍在
+    assert SystemControl(database).get("holdings_refresh_seconds") == "30"
+
+    SystemControl(database).set("holdings_refresh_seconds", "60")
+    assert SystemControl(database).get("holdings_refresh_seconds", "30") == "60"
+
+
+def test_dashboard_refresh_migration_upgrades_old_default(tmp_path: Path):
+    """老库里的旧默认 10 秒应被一次性升级为 30，且之后不再覆盖用户的选择。"""
+    from ashare_quant.services.control import SystemControl
+
+    _settings, database, _data, _broker, _signals, _trading = make_services(tmp_path)
+
+    # 场景一：老库存着旧默认值 10 → 迁移后变 30
+    SystemControl(database).set("holdings_refresh_seconds", "10")
+    SystemControl(database).migrate_dashboard_refresh(30)
+    assert SystemControl(database).get("holdings_refresh_seconds") == "30"
+
+    # 场景二：迁移后再手动选 10 秒（用户主动选择）→ 重复迁移不得改回去
+    SystemControl(database).set("holdings_refresh_seconds", "10")
+    SystemControl(database).migrate_dashboard_refresh(30)
+    assert SystemControl(database).get("holdings_refresh_seconds") == "10"
+
+    # 场景三：全新库（键不存在）→ 落到新默认值
+    fresh = tmp_path / "fresh.db"
+    fresh_db = Database(fresh)
+    fresh_db.initialize(1_000_000)
+    SystemControl(fresh_db).migrate_dashboard_refresh(30)
+    assert SystemControl(fresh_db).get("holdings_refresh_seconds") == "30"
+
+
+def test_dashboard_refresh_default_is_30_seconds():
+    """护栏：浮动盈亏刷新默认值必须是 30 秒，且 30 出现在下拉可选项里（否则 index 会取值报错）。
+
+    dashboard.py 依赖 streamlit，无法直接 import，故按源码做契约校验——防止默认值被改回 10 秒。
+    """
+    import re
+
+    source = (Path(__file__).resolve().parents[1] / "dashboard.py").read_text(encoding="utf-8")
+    default = re.search(r"^\s*DEFAULT_REFRESH_SECONDS\s*=\s*(\d+)", source, re.M)
+    assert default, "dashboard.py 应定义 DEFAULT_REFRESH_SECONDS"
+    assert int(default.group(1)) == 30
+
+    options = re.search(r"^\s*refresh_options\s*=\s*\[(.*?)\]", source, re.M)
+    assert options, "dashboard.py 应定义 refresh_options"
+    raw = options.group(1)
+    assert "DEFAULT_REFRESH_SECONDS" in raw or 30 in [int(v) for v in re.findall(r"\d+", raw)]
+    assert 0 in [int(v) for v in re.findall(r"\d+", raw)], "0（暂停刷新）必须保留在可选项里"

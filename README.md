@@ -103,6 +103,15 @@ python -m ashare_quant.cli update-data --codes 600000,600036,510300
 > 结果另有 15 秒缓存削峰。持仓表新增「价格日期」列，标注每只持仓实际采用的价格来源与日期，
 > 日线未更新至今日时给出滞后警示。
 >
+> **浮动盈亏刷新间隔可在看板选择，并持久化**：持仓页顶部有「浮动盈亏实时刷新间隔（秒，0=暂停刷新）」下拉框，
+> 默认 **30 秒**（`dashboard.py` 的 `DEFAULT_REFRESH_SECONDS`，可选 30/5/10/15/60/0）。
+> 选完自动写入 `system_settings.holdings_refresh_seconds`，**刷新页面、重新登录、重启看板都沿用该值**；
+> 想强制改回默认（例如云端库里还存着旧的 10）可直接改库：
+> ```bash
+> docker exec ashare-quant-scheduler-1 python -c "import sqlite3;c=sqlite3.connect('/app/data/ashare_quant.db');c.execute(\"UPDATE system_settings SET value='30' WHERE key='holdings_refresh_seconds'\");c.commit()"
+> ```
+> 选 10 秒会让轮询达到 6 次/分钟，是新浪限流（表现为「实时行情暂不可用」）的主要诱因，非必要不建议调低。
+>
 > **`positions.latest_price` 是「估值结果」而非权威价格**：它只在 `mark_to_market`
 > （撮合后 / 每日 15:50 收盘估值）时刷新，且取的是「不晚于目标日的**最近一个交易日**」收盘价。
 > 因此**展示层不应直接依赖该字段** —— 缺数据时它会停留在旧值，甚至长期停在买入价；

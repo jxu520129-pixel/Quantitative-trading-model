@@ -22,6 +22,12 @@ from ashare_quant.presentation import STRATEGY_LABELS, label_strategy, label_val
 from ashare_quant.utils import today_text
 
 
+# 浮动盈亏实时刷新间隔的默认值（秒）。看板下拉框可改，选择会持久化到 system_settings。
+# 默认 30 秒而非 10 秒：看板按该间隔轮询第三方实时行情（新浪/腾讯），20 次/分钟易触发限流，
+# 3 秒级刷新对「看浮盈」这个用途也几乎没有额外价值。注意该值必须出现在下方的 refresh_options 中。
+DEFAULT_REFRESH_SECONDS = 30
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def _cached_spot_prices(codes: tuple[str, ...]) -> tuple[dict[str, float], str]:
     """缓存实时行情 15 秒，避免看板 fragment 按 refresh_seconds 重跑时重复请求数据源。
@@ -634,24 +640,31 @@ with overview:
         st.subheader("资产构成")
         st.line_chart(plot_display, x="净值日期", y=["总资产", "可用现金", "持仓市值"], color=["#58A6FF", "#8B949E", "#D29922"])
 with holdings:
-    # 刷新间隔持久化到 system_settings：否则只存在 session_state，退出看板/刷新页面即回到默认 10 秒
-    refresh_options = [10, 5, 15, 30, 60, 0]
+    # 刷新间隔持久化到 system_settings：否则只存在 session_state，退出看板/刷新页面即回到默认值。
+    # 首次打开（库里没有该键）时按 DEFAULT_REFRESH_SECONDS 落库，之后一直沿用用户选过的值。
+    # 老库若存着旧默认值 10 秒，由 migrate_dashboard_refresh 一次性升级（只改一次）。
+    app.control.migrate_dashboard_refresh(DEFAULT_REFRESH_SECONDS)
+    refresh_options = [DEFAULT_REFRESH_SECONDS, 5, 10, 15, 60, 0]
     saved_refresh = app.control.get("holdings_refresh_seconds", "")
     try:
         saved_refresh_value = int(saved_refresh)
     except (TypeError, ValueError):
-        saved_refresh_value = refresh_options[0]
+        saved_refresh_value = DEFAULT_REFRESH_SECONDS
     if saved_refresh_value not in refresh_options:
-        saved_refresh_value = refresh_options[0]
+        saved_refresh_value = DEFAULT_REFRESH_SECONDS
     refresh_seconds = st.selectbox(
         "浮动盈亏实时刷新间隔（秒，0=暂停刷新）",
         refresh_options,
         index=refresh_options.index(saved_refresh_value),
         key="holdings_refresh_seconds",
-        help="选择后自动保存，刷新页面或重新打开看板都会沿用该值",
+        help="选择后自动保存；刷新页面、重新登录、重启看板都会沿用该值",
     )
     if str(refresh_seconds) != saved_refresh:
         app.control.set("holdings_refresh_seconds", str(refresh_seconds))
+    st.caption(
+        "已暂停实时刷新（需要时把间隔调回非 0）。" if refresh_seconds == 0
+        else f"已保存：每 {refresh_seconds} 秒刷新一次浮动盈亏，下次打开看板仍沿用该间隔。"
+    )
 
     def _pnl_color(value: float) -> str:
         if value > 0:
@@ -678,7 +691,7 @@ with holdings:
         # 不能直接回退到 positions.latest_price：该字段只在撮合/收盘估值（mark_to_market）
         # 时刷新，若当日日线缺失会被静默跳过，看板于是长期停留在旧价（甚至买入价）。
         # 仅交易时段请求实时行情：非交易时段第三方接口返回的本就是收盘价，
-        # 而看板按 refresh_seconds（默认 10s）高频轮询易触发限流，直接读数据库更稳。
+        # 而看板按 refresh_seconds（默认 30s）轮询易触发限流，直接读数据库更稳。
         def _in_trading_hours() -> bool:
             stamp = pd.Timestamp.now()
             if stamp.weekday() >= 5:
