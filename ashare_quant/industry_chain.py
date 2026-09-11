@@ -13,9 +13,12 @@ Phase 2 可替换为真正的图数据库（Neo4j + GNN）。
 
 from __future__ import annotations
 
+import re
+
 
 # 产业链：行业 -> {关键词, 上游, 下游}
 # 关键词用子串匹配，故避免过泛的词（如「订单」「装备」「材料」单独出现会大面积误命中）。
+# 少数无法用子串表达的歧义词（黄金/锡/种子…）见下方 KEYWORD_PATTERN_OVERRIDE 正则修正表。
 INDUSTRY_CHAIN: dict[str, dict[str, list[str]]] = {
     "半导体": {"keywords": ["半导体", "芯片", "晶圆", "封测", "封装测试", "集成电路", "IC设计",
                           "光刻", "EDA", "存储器", "存储芯片", "先进封装", "第三代半导体",
@@ -98,7 +101,9 @@ INDUSTRY_CHAIN: dict[str, dict[str, list[str]]] = {
                         "水产", "转基因", "农产品", "猪价", "白羽鸡"],
              "upstream": ["化工"], "downstream": ["食品饮料"]},
     "医药": {"keywords": ["医药", "医疗", "创新药", "疫苗", "生物医药", "医疗器械", "CRO", "CXO",
-                        "原料药", "中药", "药企", "临床试验", "FDA", "集采", "医保", "PD-1",
+                        "原料药", "中药", "药企", "临床", "临床试验", "临床验证", "临床前",
+                        "制药", "药物", "药品", "新药", "药械", "生物制药", "药物研发",
+                        "AI制药", "AI医疗", "上市许可", "MAH", "FDA", "集采", "医保", "PD-1",
                         "减肥药", "ADC", "细胞治疗", "基因治疗"],
              "upstream": ["化工"], "downstream": []},
     "环保": {"keywords": ["环保", "污水", "固废", "垃圾处理", "碳中和", "碳达峰", "节能减排",
@@ -124,6 +129,44 @@ INDUSTRY_CHAIN: dict[str, dict[str, list[str]]] = {
                           "空域", "低空飞行"],
                  "upstream": ["军工", "通信", "电池"], "downstream": ["汽车", "旅游"]},
 }
+
+
+# 关键词的「误命中上下文」修正表：中文里有不少行业词同时是高频**修辞词或地名**，
+# 裸子串匹配会把它们误判成行业词，于是事件被关联到风马牛不相及的板块。典型：
+#   - 「黄金发展期 / 黄金时代 / 黄金周」里的「黄金」不是贵金属（曾把「AI制药…迎来黄金
+#     发展期」匹配到厦门钨业/北方稀土/盛和资源等有色金属股）；
+#   - 「无锡」是城市名，不是锡金属；「白银市」是甘肃地名，不是白银；
+#   - 「种子企业 / 种子用户 / 种子轮」不是农业种子；「游戏规则」不是游戏行业；
+#   - 「保险起见」不是保险业；「面板数据」是计量术语，不是显示面板。
+#
+# 命中这些关键词时改用**带否定的正则**（而非子串判断）：
+#   - 前缀型（如「无锡」）：用负向后顾 `(?<!无)`；
+#   - 后缀型（如「黄金发展期」）：用负向前瞻 `(?!发展期|...)`；
+#   - 语义完全漂移（如「锡」）：直接改成具体词组白名单。
+#
+# 新增关键词时若在财经标题里存在修辞/地名歧义，请一并在此登记。
+KEYWORD_PATTERN_OVERRIDE: dict[str, str] = {
+    "黄金": r"黄金(?!(?:发展期|时期|时代|周期|十年|窗口|赛道|时段|周|分割|比例|交叉|时刻|时机|机会|搭档|地段|法则|定律|档期))",
+    "锡": r"(?:锡价|锡锭|精锡|沪锡|伦锡|锡矿|锡金属|焊锡|锡焊|锡业|锡资源)",
+    "白银": r"白银(?!市|区)",
+    "种子": r"种子(?!企业|用户|客户|轮|选手|团队|基金|期|思维|地块)",
+    "游戏": r"游戏(?!规则|玩法|改变)",
+    "保险": r"保险(?!起见|杠|丝)",
+    "面板": r"面板(?!数据)",
+    "玻璃": r"玻璃(?!心|天花板)",
+}
+
+_OVERRIDE_RE: dict[str, re.Pattern[str]] = {
+    keyword: re.compile(pattern) for keyword, pattern in KEYWORD_PATTERN_OVERRIDE.items()
+}
+
+
+def _hit_keyword(keyword: str, event_text: str) -> bool:
+    """关键词命中判断：有歧义的关键词走正则修正表，其余用子串匹配。"""
+    override = _OVERRIDE_RE.get(keyword)
+    if override is not None:
+        return override.search(event_text) is not None
+    return keyword in event_text
 
 
 # 龙头公司 / 产品 / 技术术语 → 标准行业。
@@ -259,7 +302,7 @@ def _keyword_hits(event_text: str) -> list[str]:
     return [
         industry
         for industry, info in INDUSTRY_CHAIN.items()
-        if any(keyword in event_text for keyword in info["keywords"])
+        if any(_hit_keyword(keyword, event_text) for keyword in info["keywords"])
     ]
 
 

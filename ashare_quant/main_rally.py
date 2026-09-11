@@ -313,6 +313,11 @@ def match_event_candidates(
         affected = {a.strip() for a in (event.get("affected_industries") or "").split(",") if a.strip()}
         hit_industries = set(affected_industries(text)) | affected
     if not hit_industries:
+        # 文本自身没有任何行业词时，退回事件**分类**（event_type，如「医药」「政策」）。
+        # 例：「AI制药正式进入临床验证阶段」早期不含「医药」关键词，靠分类兜底才不至于
+        # 落到空匹配、进而被后备池的无关行业（有色金属）顶替。
+        hit_industries = set(direct_industries(str(event.get("event_type") or "")))
+    if not hit_industries:
         return []
     matched: list[dict[str, Any]] = []
     for c in candidates:
@@ -379,6 +384,27 @@ def format_daily_events_html(
         text = ((ev.get("title") or "") + " " + (ev.get("summary") or "")).strip()
         return text or ((ev.get("title") or "") + " " + (ev.get("affected_industries") or ""))
 
+    def _event_direct_industries(ev: dict[str, Any]) -> list[str]:
+        """事件直接命中的行业；文本里没有任何行业词时，退回事件分类（event_type）。
+
+        例：「AI制药正式进入临床验证阶段」在补词前不含「医药」关键词，仅靠文本会得到空集，
+        于是被后备池里恰好命中的无关行业（有色金属）顶替。分类兜底可避免这类静默错配。
+        """
+        return direct_industries(_event_text(ev)) or direct_industries(str(ev.get("event_type") or ""))
+
+    def _event_risk_industries(ev: dict[str, Any], limit: int = 6) -> list[str]:
+        """利空事件「受影响的敏感板块」：直接命中行业 + 宏观承压板块（如 美联储/加息 → 银行/保险/有色）。
+
+        **刻意不落到个股**：把利空事件关联到具体股票，读者会误读成买入建议；而宏观利空
+        （加息/制裁/关税）的板块影响本就是方向性、非公司性的，用「行业成交额代表股」去
+        承载它必然错位——曾把「美联储加息概率升至72.4%」关联到厦门钨业/北方稀土/盛和资源。
+        """
+        text = _event_text(ev)
+        merged = (
+            direct_industries(text) or direct_industries(str(ev.get("event_type") or ""))
+        ) + macro_industries(text)
+        return list(dict.fromkeys(merged))[:limit]
+
     def _stock_names() -> list[tuple[str, str]]:
         """全市场股票简称（≥3 字、排除 ST/退市），用于事件文本里的公司名直配。"""
         if "v" not in _name_cache:
@@ -394,16 +420,22 @@ def format_daily_events_html(
         return _name_cache["v"]
 
     def _query_industry_pool(industries: list[str], per_industry: int = 12) -> list[dict[str, Any]]:
-        """按标准行业查活跃股票，每个 Tushare 行业分别限额。
+        """按标准行业查活跃股票，**跨行业轮流取**（每个行业各自限额）。
 
         排序用 **成交额** 而非收盘价：股价高低与「与事件的相关度」无关，按 close 排序会让
         高价股垄断每个行业的名额；成交额代表流动性与市场关注度，更适合作为行业代表标的。
+
+        命中多个行业时必须**轮流（round-robin）交织**，不能按 Tushare 行业名顺序依次堆叠：
+        `TUSHARE_TO_CHAIN` 里「有色金属」下挂着小金属/铜/铝/铅锌/黄金/矿物制品/稀土永磁 共 7 个
+        Tushare 行业名，靠前堆叠会让它们把前几个名额全部占满 —— 命中「银行·保险·有色金属」
+        的事件最终只反映出「小金属」（厦门钨业/北方稀土/盛和资源就是这么来的）。
         """
         if not industries:
             return []
         tushare_names = [t for t, c in TUSHARE_TO_CHAIN.items() if c and c in industries]
-        pool: list[dict[str, Any]] = []
+        buckets: dict[str, list[dict[str, Any]]] = {}
         for name in tushare_names:
+            chain = TUSHARE_TO_CHAIN.get(name) or ""
             try:
                 rows = database.query_all(
                     """SELECT sb.code, sb.name, si.industry, db.close AS price
@@ -416,14 +448,22 @@ def format_daily_events_html(
                        ORDER BY db.amount DESC LIMIT ?""",
                     (name, per_industry),
                 )
-                for r in rows:
-                    pool.append({
-                        "code": r["code"], "name": r["name"], "industry": r["industry"],
-                        "price": float(r["price"] or 0), "score": 50.0, "price_date": "",
-                    })
             except Exception as error:  # noqa: BLE001
                 LOG.warning("查询事件后备股票池失败（%s）：%s", name, error)
-        return pool
+                continue
+            bucket = buckets.setdefault(chain, [])
+            for r in rows:
+                bucket.append({
+                    "code": r["code"], "name": r["name"], "industry": r["industry"],
+                    "price": float(r["price"] or 0), "score": 50.0, "price_date": "",
+                    "source": "pool",
+                })
+        pooled: list[dict[str, Any]] = []
+        for rank in range(per_industry):
+            for bucket in buckets.values():
+                if rank < len(bucket):
+                    pooled.append(bucket[rank])
+        return pooled
 
     def _match_by_name(ev: dict[str, Any], limit: int) -> list[dict[str, Any]]:
         """事件文本里直接出现 A 股公司简称时，优先精确命中该股（最可靠的相关性信号）。"""
@@ -449,7 +489,8 @@ def format_daily_events_html(
             return []
         return [
             {"code": r["code"], "name": r["name"], "industry": r["industry"] or "",
-             "price": float(r["price"] or 0), "score": 50.0, "price_date": ""}
+             "price": float(r["price"] or 0), "score": 50.0, "price_date": "",
+             "source": "name"}
             for r in rows
         ]
 
@@ -461,6 +502,10 @@ def format_daily_events_html(
         ③ 事件专属后备池（按直接命中行业查库，成交额排序取代表股）；
         ④ 宏观兜底（事件无行业词时用宏观→受益板块，如降准 → 银行/地产/券商）；
         ⑤ 候选池放宽到含上下游的宽松匹配。
+
+        ③ 起的行业取不到时会退回事件分类（event_type），详见 ``_event_direct_industries``。
+        ③ 返回的标的是「行业代表股」，其 ``score`` 是占位值 50（未做个股评分），
+        报告里据此标注为「行业代表标的」而非「核心标的」。
         """
         hit = _match_by_name(ev, limit)
         if hit:
@@ -469,7 +514,7 @@ def format_daily_events_html(
         if hit:
             return hit
         text = _event_text(ev)
-        hit = match_event_candidates(ev, _query_industry_pool(direct_industries(text)), limit=limit)
+        hit = match_event_candidates(ev, _query_industry_pool(_event_direct_industries(ev)), limit=limit)
         if hit:
             return hit
         macro = macro_industries(text)
@@ -484,7 +529,6 @@ def format_daily_events_html(
         mag = int(ev.get("magnitude") or 1)
         direction = str(ev.get("causal_direction") or "中性")
         color = _DIR_COLOR.get(direction, "#7f8c8d")
-        stocks = _event_stocks(ev, limit=3)
         parts.append(
             f'<div style="border:1px solid #e8ecef;border-left:3px solid {border_color};border-radius:6px;'
             'padding:8px 12px;margin:8px 0;background:#fbfcfd;">'
@@ -500,13 +544,43 @@ def format_daily_events_html(
             f'持续性 {esc(str(ev.get("persistence") or "短期"))}　'
             f'{esc(str(ev.get("event_time") or "")[:16])}</div>'
         )
+        if direction == "负":
+            # 利空事件不落到个股：给出股票会被读成「推荐买入」，且宏观利空的受益板块映射
+            # 方向本身就是反的（曾把「美联储加息概率升至72.4%」关联到稀土/钨股）。
+            sectors = _event_risk_industries(ev)
+            if sectors:
+                risk_str = " · ".join(esc(s) for s in sectors)
+                parts.append(
+                    f'<div style="font-size:12.5px;color:#993c1d;">受影响的敏感板块：{risk_str}'
+                    '<span style="color:#b0b6bd;">（利空事件，仅提示板块，不提供个股标的）</span></div>'
+                )
+            else:
+                parts.append(
+                    '<div style="font-size:12px;color:#b0b6bd;">利空事件，未识别到明确的受影响板块</div>'
+                )
+            parts.append('</div>')
+            return
+        stocks = _event_stocks(ev, limit=3)
         if stocks:
-            stock_str = "　".join(
-                f'<span style="white-space:nowrap;">{esc(str(s["name"]))}({s["code"]}) '
-                f'¥{float(s.get("price") or 0):.2f}　评分<b style="color:#e67e22;">{float(s.get("score") or 0):.0f}</b></span>'
-                for s in stocks
-            )
-            parts.append(f'<div style="font-size:12.5px;color:#333;">关联核心标的：{stock_str}</div>')
+            from_pool = all(s.get("source") == "pool" for s in stocks)
+
+            def _one_stock(s: dict[str, Any]) -> str:
+                head = f'{esc(str(s["name"]))}({s["code"]}) ¥{float(s.get("price") or 0):.2f}'
+                # 后备池的 score 恒为占位值 50（未做个股评分），展示出来会误导，
+                # 因此这类标的只显示价格，并在下方标注「行业代表标的」。
+                if s.get("source") == "pool":
+                    return f'<span style="white-space:nowrap;">{head}</span>'
+                return (f'<span style="white-space:nowrap;">{head}　评分'
+                        f'<b style="color:#e67e22;">{float(s.get("score") or 0):.0f}</b></span>')
+
+            stock_str = "　".join(_one_stock(s) for s in stocks)
+            if from_pool:
+                label = '关联行业代表标的（按成交额取该行业代表股，未做个股评分）：'
+            elif any(s.get("source") == "name" for s in stocks):
+                label = '关联核心标的（事件直接提及）：'
+            else:
+                label = '关联核心标的：'
+            parts.append(f'<div style="font-size:12.5px;color:#333;">{label}{stock_str}</div>')
         else:
             parts.append('<div style="font-size:12px;color:#b0b6bd;">关联核心标的：当日候选池无直接匹配</div>')
         parts.append('</div>')
@@ -547,7 +621,7 @@ def format_daily_events_html(
         '<div style="font-family:Microsoft YaHei,Arial,sans-serif;max-width:860px;">'
         '<div style="background:#34495e;color:#fff;padding:12px 16px;border-radius:6px;">'
         f'<h3 style="margin:0;font-size:17px;">A股今日重要事件 · {datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")}</h3>'
-        '<p style="margin:5px 0 0;font-size:13px;opacity:.92;">当日核心要闻按重要性排序（含利空风险提醒），附命中行业的核心候选标的。</p>'
+        '<p style="margin:5px 0 0;font-size:13px;opacity:.92;">当日核心要闻按重要性排序；正向事件附命中行业的关联标的，利空事件仅提示敏感板块。</p>'
         '</div>'
     )
     footer = (
