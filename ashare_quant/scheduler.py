@@ -12,7 +12,7 @@ from .fundamental import update_fundamentals
 from .lab import build_buy_report, fetch_scan_quotes, fresh_quotes, scan_buy_candidates
 from .main_rally import generate_daily_events_report, generate_main_rally_report
 from .services.runtime import Runtime, build_runtime
-from .utils import today_text
+from .utils import normalize_date, today_text
 
 
 LOG = logging.getLogger(__name__)
@@ -93,14 +93,18 @@ def after_close(runtime: Runtime) -> None:
     LOG.info("盘后流程完成：更新结果=%s，收盘价离场=%s", update, outcome)
 
 
-def _close_prices(runtime: Runtime, codes: list[str]) -> dict[str, float]:
-    """取指定标的**当日**收盘价（盘后离场按收盘价成交）。"""
+def _close_prices(runtime: Runtime, codes: list[str], trade_date: str | None = None) -> dict[str, float]:
+    """取指定标的的**当日**收盘价（盘后离场按收盘价成交）。
+
+    ``trade_date`` 默认取今天；抽成参数是为了可测（演示数据的最后一条是「最近一个交易日」，
+    节假日/周末调用时与自然日不一致，硬编码今天会让测试依赖运行日期）。
+    """
     if not codes:
         return {}
     placeholders = ",".join("?" * len(codes))
     rows = runtime.database.query_all(
         f"SELECT code, close FROM daily_bars WHERE trade_date=? AND code IN ({placeholders})",
-        [today_text(), *codes],
+        [normalize_date(trade_date or today_text()), *codes],
     )
     return {row["code"]: float(row["close"]) for row in rows if float(row["close"] or 0) > 0}
 

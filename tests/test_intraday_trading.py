@@ -247,19 +247,27 @@ def test_intraday_summary_text():
 
 
 def test_close_prices_reads_today_close(tmp_path: Path):
-    """盘后离场取的是**当日**收盘价，缺失的标的不得混入。"""
+    """盘后离场取的是**当日**收盘价，缺失的标的不得混入。
+
+    注意：演示数据的最后一条是「最近一个交易日」，周末/节假日跑测试时它不等于自然日，
+    所以这里用库里真实的最后一个交易日，避免测试依赖运行日期。
+    """
     from types import SimpleNamespace
 
     from ashare_quant.scheduler import _close_prices
 
     _settings, database, _broker, _signals, _trading = make_services(tmp_path)
-    day = today_text()
-    prices = _close_prices(SimpleNamespace(database=database), ["600000", "999999"])
+    last_day = str(database.query_one("SELECT MAX(trade_date) AS d FROM daily_bars")["d"])
+
+    prices = _close_prices(SimpleNamespace(database=database), ["600000", "999999"], last_day)
+
     assert "999999" not in prices
     bar = database.query_one(
-        "SELECT close FROM daily_bars WHERE code='600000' AND trade_date=?", (day,)
+        "SELECT close FROM daily_bars WHERE code='600000' AND trade_date=?", (last_day,)
     )
     assert prices["600000"] == float(bar["close"])
+    # 用一个库里没有的日期应返回空（不得回退成更早的收盘价）
+    assert _close_prices(SimpleNamespace(database=database), ["600000"], "1990-01-02") == {}
 
 
 def test_run_scheduler_registers_intraday_trade_jobs(monkeypatch):

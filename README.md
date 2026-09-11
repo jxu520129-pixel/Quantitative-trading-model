@@ -4,6 +4,16 @@
 
 > 默认模式始终是 `PAPER`。QMT、PTrade 和 easytrader 文件只是适配边界，不包含可执行实盘下单逻辑。接入真实账户前应完成券商 SDK、交易权限、报单回调、撤单、重连和小资金验收。
 
+## 近期重要变更
+
+> 只记改变**行为**或**数据口径**的改动，详细说明见下文对应章节。
+
+**2026-09-11**
+
+- **模拟盘买卖改为盘中即时成交，不再跨日**。买入不再是「15:30 生成信号 → 次日 09:26 按开盘价成交」，而是在 `scheduler.intraday_scan_times`（默认 `09:37 / 10:00 / 10:30 / 14:30 / 14:50`）用**实时价**扫描发现即买；卖出同样以实时价即时离场（止损不再滞后一天）。15:30 不买入（盘后固定价格时段只能按收盘价成交），只做买点扫描回顾与**按当日收盘价离场**。实时行情不可用时跳过本次、不做任何成交。→ 见「日线运行时序」「盘中买点扫描与盘中即时成交」。
+- **事件→个股匹配修复两处错配**：① 「产业链迎来**黄金**发展期」这类修辞被 `有色金属` 的裸关键词「黄金」误命中，导致事件关联到稀土/钨股；改为 `KEYWORD_PATTERN_OVERRIDE` 正则修正表 + 关键词统一走 `_hit_keyword()`。② 多行业后备池被 `TUSHARE_TO_CHAIN` 里排前的行业吃光名额（命中「银行·保险·有色金属」却只出「小金属」），改为按标准行业 **round-robin 轮流取**。另：文本无行业词时退回事件分类 `event_type` 兜底；**利空事件不再给个股**、只提示「受影响的敏感板块」；后备池标的标注为「行业代表标的」且不显示占位评分 50。→ 见「主升浪盘前扫描与富文本报告」。
+- **看板浮动盈亏刷新间隔默认 30 秒**（原 10 秒）。下拉框仍可选 `30/5/10/15/60/0` 并持久化到 `system_settings.holdings_refresh_seconds`（刷新页面 / 重新登录 / 重启看板都沿用）；老库里存着旧默认 `10` 的会由 `SystemControl.migrate_dashboard_refresh()` **一次性**迁移为 30。→ 见「获取真实行情」下的看板取价说明。
+
 ## 项目结构
 
 ```text
@@ -69,10 +79,14 @@ Copy-Item .env.example .env
 python -m ashare_quant.cli init-db
 python -m ashare_quant.cli seed-demo
 python -m ashare_quant.cli backtest --strategy momentum_rotation
-python -m ashare_quant.cli paper-demo
+python -m ashare_quant.cli paper-demo        # 离线演示：信号→排队→下一交易日按开盘价成交
 python -m ashare_quant.cli status
 streamlit run dashboard.py
 ```
+
+> `paper-demo` 走的是**遗留的跨日路径**（只用于离线自检，不依赖网络与实时行情）。
+> **日常买卖不用它**：模拟盘买点已改为盘中即时成交，走常驻调度器或
+> `python -m ashare_quant.cli intraday-trade`（需要能拉到实时行情）。
 
 浏览器访问 `http://localhost:8501`。配置了管理员密码时，账户、持仓、委托与回测数据在登录前处于隐藏状态；输入 `.env` 中管理员密码后，策略开关、模拟成交、生成信号和手动平仓才可操作（登录状态在会话内保持）。
 
@@ -558,7 +572,9 @@ docker compose exec -T scheduler python -m ashare_quant.cli seed-demo
 docker compose exec -T scheduler python -m ashare_quant.cli paper-demo
 ```
 
-Docker 同时启动看板和调度器，共享一个 SQLite WAL 数据卷。镜像默认通过 DaoCloud 代理获取 Python Slim，并固定为 Docker Hub 官方清单摘要；其他网络环境可通过 `docker compose build --build-arg PYTHON_IMAGE=python:3.11-slim` 切回官方源，pip 依赖默认走清华镜像、可用 `--build-arg PIP_INDEX_URL=...` 覆盖。Linux 原生部署示例位于 `deploy/`：将项目放到 `/opt/ashare-quant`、创建 `quant` 用户和虚拟环境后，复制并启用两个 systemd unit。也可以使用 `deploy/crontab.example`，但不要同时运行 cron 和内置调度器。
+Docker 同时启动看板和调度器，共享一个 SQLite WAL 数据卷。镜像默认通过 DaoCloud 代理获取 Python Slim，并固定为 Docker Hub 官方清单摘要；其他网络环境可通过 `docker compose build --build-arg PYTHON_IMAGE=python:3.11-slim` 切回官方源，pip 依赖默认走清华镜像、可用 `--build-arg PIP_INDEX_URL=...` 覆盖。Linux 原生部署示例位于 `deploy/`：将项目放到 `/opt/ashare-quant`、创建 `quant` 用户和虚拟环境后，复制并启用两个 systemd unit。
+
+也可以使用 `deploy/crontab.example`，但**不要同时运行 cron 和内置调度器**。该示例含 **8 条任务**（开盘前结算 + 5 个盘中即时交易 + 盘后离场 + 收盘风控），与 `scheduler.intraday_scan_times` 对齐——**盘中 `intraday-trade` 是买点的唯一入口，漏掉就不会有任何买入**（Windows 侧同理，见 `scripts/install_windows_tasks.ps1 -Mode Discrete`）。
 
 ## 云服务器部署与更新
 
@@ -588,6 +604,11 @@ cd ~/ashare-quant && git pull && sudo docker compose up -d --build
 
 要点：数据（SQLite + 模型）存于 `quant-data` 数据卷，重建容器不丢数据（切勿 `docker compose down -v`）；`.env` 不进 git，云端本地保留；`config/default.yaml` 是版本化文件，云端若需覆盖参数用 `config/local.yaml` + `.env` 的 `QUANT_CONFIG` 指向，避免 `git pull` 冲突；看板端口 8501 需在云控制台防火墙放行。
 
+> **git 常见报错**（详见 `部署更新指南.md` 注意事项）：
+> `fatal: not a git repository` = **没在项目目录里执行**（提示符必须是 `...\Quantitative trading model>`，路径含空格要加引号）；
+> `git status` 显示 `[gone]` 或找不到 `origin/main` = 本地远程跟踪引用丢失，**不影响推送与云端拉取**，用 `git ls-remote --heads origin` 核对远程真实状态，修法见指南第 10 条。
+> 本机推 GitHub 必须开 Clash（git 已配 `http.proxy=127.0.0.1:7890`）；首次 `push` 偶发 `send-pack: unexpected disconnect` 属代理抖动，**原样重试即可**。
+
 **云端拉取回测数据**：`data/*.db` 在 `.gitignore` 中、不随 git 上传，因此云端首次（或数据重建后）需在容器内拉一次全市场历史库，否则回测会退化为演示库（30 只，回测 0 笔交易）。前提是 `.env` 已配置 `TUSHARE_TOKEN` 与 `TUSHARE_API_URL`（`docker compose up -d --build` 重建后经 `env_file` 注入容器）：
 
 ```bash
@@ -611,12 +632,23 @@ docker exec ashare-quant-scheduler-1 python scripts/fetch_hist_data.py --start 2
 python -m pytest -q
 ```
 
-测试使用临时 SQLite 和演示行情，覆盖：费用/整手/涨停规则、信号到模拟成交、Backtrader 回测落库，
-以及**多策略并行**的独立买卖与止损止盈（`tests/test_multi_strategy.py`：策略只平自己买入的仓、
-同股只买一次、跨策略名额分配、涨停过滤只作用于买入、建仓记账、旧库迁移、策略解析兜底）。
+测试使用临时 SQLite 和演示行情，共 **62 个用例**，覆盖：
+
+- **基础规则**：费用/整手/涨停规则、信号到模拟成交、Backtrader 回测落库（`tests/test_core.py`）。
+- **多策略并行**的独立买卖与止损止盈（`tests/test_multi_strategy.py`：策略只平自己买入的仓、同股只买一次、跨策略名额分配、涨停过滤只作用于买入、建仓记账、旧库迁移、策略解析兜底）。
+- **盘中即时交易**（`tests/test_intraday_trading.py`）：买点当天成交、委托不跨日、成交时间记真实时刻、T+1 仍生效、止损按实时价即时卖出、单日新开名额跨时点共享、同一交易日不重复买同一只、行情不可用时**零成交**、盘中不追涨停、`fresh_quotes` 剔除残留旧价，以及**调度器注册验收**（现场 stub `BlockingScheduler`，断言注册了 5 个 `intraday_trade_HHMM` 且**没有** `intraday_trade_1530`、也没有旧的 `buy_scan_*`）。
+- **事件→个股匹配**（`tests/test_industry_matching.py`）：歧义词参数化断言（黄金发展期/无锡/种子轮/面板数据…）、事件分类 `event_type` 兜底、利空事件只给板块不给个股、多行业后备池跨行业分散，以及端到端 HTML 断言（只出现医药股、绝不出现稀土股）。
+- **看板设置持久化**：刷新间隔跨「重新登录」沿用、老库 `10` 秒一次性迁移为 30、用户主动选回 10 不被迁移覆盖，另有源码契约护栏防止默认值被改回 10。
+
+> 看板相关的 UI 行为（如下拉框默认值与落库）可用 `streamlit.testing.v1.AppTest` 无头验证：
+> `at = AppTest.from_file("dashboard.py")`，**注意看板未登录会 `st.stop()`**，
+> 需先 `at.session_state["_admin_ok"] = True` 再 `at.run()`，否则读不到任何控件。
 
 ## 生产部署检查
 
-已内置：交易日历（`ashare_quant/trading_calendar.py`，法定节假日与调休休市自动跳过，接口失败退回工作日判断）与复权一致性（`pre_close` 统一取同序列上一交易日收盘）。
+已内置：交易日历（`ashare_quant/trading_calendar.py`，法定节假日与调休休市自动跳过，接口失败退回工作日判断）；复权一致性（`pre_close` 统一取同序列上一交易日收盘）；**实时行情时间戳与陈旧报价拦截**——`market_quotes` 按 code 覆盖写入、不会自动过期，交易与盘前报告统一经 `lab.fresh_quotes()` 按 `quote_time` 是否为当日筛选，拿不到当日行情即**跳过本次、不成交**，看板持仓表另有「价格日期」列与日线滞后警示。
 
-服务器上线前仍需完成：AkShare 接口巡检、行情时间戳与陈旧报价拦截、SQLite 定时备份、通知送达测试、断网恢复、进程看护、QMT/PTrade 沙箱验收和小资金限额测试。内置交易日历为交易所口径，不能替代券商实盘侧的交易日状态与成交回报。
+服务器上线前仍需完成：AkShare 接口巡检、SQLite 定时备份、通知送达测试、断网恢复、进程看护、QMT/PTrade 沙箱验收和小资金限额测试。内置交易日历为交易所口径，不能替代券商实盘侧的交易日状态与成交回报。
+
+> **上实盘前的口径提醒**：回测引擎（`run_signal_backtest`）是「第 T 日信号、第 T+1 日开盘成交」，
+> 而模拟盘现在改成**盘中实时价即时成交**。两者不是同一成交口径，拿回测数字做决策时要留意这个差异。
