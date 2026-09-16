@@ -697,7 +697,10 @@ with holdings:
             if stamp.weekday() >= 5:
                 return False
             hm = stamp.strftime("%H:%M")
-            return "09:15" <= hm <= "11:30" or "13:00" <= hm <= "15:05"
+            # **含午休（11:30-13:00）**：午休的「最新价」冻结在 11:30 收盘，若不取实时价，
+            # 看板会退回「最近交易日收盘价」，浮盈显示就不对（曾让用户以为收益不更新）。
+            # 请求频率受 fragment 间隔（默认 30s）+ 15s 缓存限制，多出的量可忽略。
+            return "09:15" <= hm <= "15:05"
 
         quotes: dict[str, float] = {}
         live_ok = False
@@ -748,13 +751,22 @@ with holdings:
         total_pnl = float(view["浮动盈亏"].sum())
         total_color = "#ff6b6b" if total_pnl > 0 else "#36C98F" if total_pnl < 0 else "#e6edf3"
         if live_ok:
-            source = live_source or "实时行情"
+            source = f"实时价（{live_source or '实时行情'}）"
         elif db_date:
-            source = f"数据库收盘价（截至 {db_date}）"
+            source = f"最近交易日收盘价（截至 {db_date}）"
         else:
             source = "数据库价格（缺日线数据）"
         today = pd.Timestamp.now().strftime("%Y-%m-%d")
-        stale_warn = "　⚠️ 日线未更新至今日，现价可能滞后" if not live_ok and db_date and db_date != today else ""
+        # 警示文案按场景区分：日线本来就在 15:30 才更新，盘中「未更新至今日」是常态，
+        # 不该每天都弹「现价可能滞后」；真正要紧的是「交易时段却拿不到实时行情」。
+        if live_ok:
+            stale_warn = ""
+        elif _in_trading_hours():
+            stale_warn = "　⚠️ 交易时段内实时行情不可用（限流或数据源异常），已退回最近交易日收盘价"
+        elif db_date and db_date != today:
+            stale_warn = "　· 当前为最近交易日收盘价（当日日线 15:30 后更新）"
+        else:
+            stale_warn = ""
         updated = pd.Timestamp.now().strftime("%H:%M:%S")
         st.markdown(
             f"<span style='font-size:0.92rem'>{source} · 上次更新 {updated} · "
@@ -781,12 +793,23 @@ with holdings:
     ]
     if position_codes:
         close_code = st.selectbox("手动平仓标的", position_codes, disabled=not is_admin)
-        if st.button("提交全量平仓委托", disabled=not is_admin):
+        if st.button("全部平仓（按实时价立即成交）", disabled=not is_admin):
             try:
-                order_id = app.trading.queue_manual_close(close_code)
-                st.success(f"全量平仓委托已提交，委托编号：{order_id}")
+                result = app.trading.manual_close_now(close_code)
             except Exception as error:
                 st.error(str(error))
+            else:
+                if result["filled"]:
+                    st.success(
+                        f"已成交：卖出 {result['code']} × {result['quantity']} 股，"
+                        f"成交价 ¥{result['price']:.2f}（{result['price_source']}），"
+                        f"委托编号 {result['order_id']}"
+                    )
+                    st.rerun()
+                else:
+                    st.warning(
+                        f"委托已提交但未成交（{result['order_id']}），请到「委托成交」页查看拒绝原因。"
+                    )
 with orders:
     # 按策略筛选：多策略并行时，每个策略的委托/成交可单独查看
     order_filter = st.selectbox(

@@ -283,6 +283,73 @@ def test_intraday_buy_amount_capped_by_available_cash(tmp_path: Path):
     assert gross <= 20000, f"成交金额 {gross} 不得超过可用现金 20000"
 
 
+def test_manual_close_fills_immediately(tmp_path: Path, monkeypatch):
+    """看板手动平仓必须**当场成交**——旧实现把委托挂到下一交易日，用户以为平仓失败。"""
+    import ashare_quant.services.trading as trading_module
+
+    monkeypatch.setattr(
+        trading_module, "spot_prices", lambda codes, timeout=5.0: ({codes[0]: 22.13}, "新浪")
+    )
+    settings, database, broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    entry = _latest_close(database, "600000")
+    trading.execute_intraday(
+        quotes={"600000": _quote(entry, day)},
+        candidates=_candidates([("600000", "浦发银行", entry, 8.0e8)]),
+    )
+    broker.roll_to_new_day("2099-12-31")  # T+1 解锁
+
+    result = trading.manual_close_now("600000")
+
+    assert result["filled"] == 1
+    assert result["price_source"].startswith("实时价")
+    order = database.query_one("SELECT * FROM orders WHERE code='600000' AND side='SELL'")
+    assert order["status"] == "FILLED"
+    assert order["trade_date"] == day, "手动平仓不得跨日排队"
+    assert not [item for item in broker.get_positions() if item.code == "600000"]
+
+
+def test_manual_close_falls_back_to_daily_close_without_quote(tmp_path: Path, monkeypatch):
+    """实时行情不可用时退回最近交易日收盘价（平仓是明确指令，不让仓位继续暴露）。"""
+    import ashare_quant.services.trading as trading_module
+
+    monkeypatch.setattr(trading_module, "spot_prices", lambda codes, timeout=5.0: ({}, ""))
+    settings, database, broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    entry = _latest_close(database, "600000")
+    trading.execute_intraday(
+        quotes={"600000": _quote(entry, day)},
+        candidates=_candidates([("600000", "浦发银行", entry, 8.0e8)]),
+    )
+    broker.roll_to_new_day("2099-12-31")
+
+    result = trading.manual_close_now("600000")
+
+    assert result["filled"] == 1
+    assert "最近交易日收盘价" in result["price_source"]
+    fill = database.query_one("SELECT * FROM fills WHERE code='600000' AND side='SELL'")
+    assert abs(float(fill["price"]) - entry) / entry < 0.01
+
+
+def test_manual_close_respects_t1(tmp_path: Path, monkeypatch):
+    """当日买入的仓位不可卖（T+1），手动平仓须给出明确错误而不是挂单。"""
+    import ashare_quant.services.trading as trading_module
+
+    monkeypatch.setattr(
+        trading_module, "spot_prices", lambda codes, timeout=5.0: ({codes[0]: 22.13}, "新浪")
+    )
+    settings, database, broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    entry = _latest_close(database, "600000")
+    trading.execute_intraday(
+        quotes={"600000": _quote(entry, day)},
+        candidates=_candidates([("600000", "浦发银行", entry, 8.0e8)]),
+    )
+
+    with pytest.raises(ValueError, match="T\+1"):
+        trading.manual_close_now("600000")
+
+
 def test_resume_trading_clears_pause(tmp_path: Path):
     """看板「解除交易暂停」应清零失败计数与暂停标志，并留审计事件。"""
     settings, database, _broker, _signals, _trading = make_services(tmp_path)

@@ -10,6 +10,7 @@ import pandas as pd
 
 from ..brokers.paper import PaperBroker
 from ..config import Settings
+from ..data.providers import spot_prices
 from ..data.service import DataService
 from ..database import Database
 from ..market_rules import round_to_lot
@@ -287,19 +288,56 @@ class TradingService:
                 break
         return picks
 
-    def queue_manual_close(self, code: str, as_of_date: str | None = None) -> str:
-        """看板手动全量平仓：对指定持仓提交一笔卖出委托，返回委托 id。"""
+    # ---------------------------------------------------------------- 手动平仓
+    def manual_close_now(self, code: str) -> dict[str, Any]:
+        """看板手动全量平仓：以**实时价**立即成交，不再排队到下一交易日开盘。
+
+        手动平仓是用户明确的指令，与策略离场一样应当即时执行。旧实现把委托挂到
+        ``next_weekday``（下一交易日），盘中点「全部平仓」后要等到次日 09:26 才按开盘价
+        成交，期间委托一直 PENDING——用户会当成「平仓失败，无法成交」（2026-09-16 反馈）。
+
+        实时行情不可用时退回最近交易日收盘价：平仓是明确指令，宁可价格近似也不让仓位
+        继续暴露，但会在结果里标注价格来源，避免误以为是实时价。
+        """
         position = next((item for item in self.broker.get_positions() if item.code == code), None)
         if not position:
             raise ValueError(f"未找到证券 {code} 的持仓")
         quantity = round_to_lot(position.sellable_quantity)
         if quantity <= 0:
             raise ValueError("该持仓当日不可卖出，不符合 T+1 规则")
-        request = OrderRequest(
+
+        trade_date = normalize_date(today_text())
+        price, price_source = self._latest_price(code)
+        order_id = self.broker.submit_order(OrderRequest(
             code=code, name=position.name, side=OrderSide.SELL, quantity=quantity,
-            strategy="manual", trade_date=next_weekday(as_of_date or today_text()), reason="看板手动全量平仓",
+            strategy="manual", trade_date=trade_date, requested_price=price,
+            reason=f"看板手动全量平仓（{price_source}）",
+        ))
+        outcome = self.broker.execute_pending_orders(
+            trade_date,
+            price_overrides={code: price} if price > 0 else None,
+            filled_at=intraday_fill_time(trade_date),
         )
-        return self.broker.submit_order(request)
+        return {
+            "order_id": order_id, "code": code, "quantity": quantity,
+            "price": price, "price_source": price_source,
+            "filled": outcome["filled"], "rejected": outcome["rejected"], "failed": outcome["failed"],
+        }
+
+    def _latest_price(self, code: str) -> tuple[float, str]:
+        """取成交参考价：实时行情优先（多源降级），拿不到则退回最近交易日收盘价。"""
+        try:
+            quotes, source = spot_prices([code])
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("手动平仓取实时行情失败：%s", error)
+            quotes, source = {}, ""
+        price = float(quotes.get(code) or 0)
+        if price > 0:
+            return price, f"实时价·{source or '实时行情'}"
+        bar = self.data.latest_bar(code)
+        if bar and float(bar["close"] or 0) > 0:
+            return float(bar["close"]), f"最近交易日收盘价 {bar['trade_date']}（实时行情不可用）"
+        raise ValueError(f"无法获取 {code} 的可用价格（实时行情与日线均不可用）")
 
     def _set_signal_status(self, signal_id: str, status: str) -> None:
         """更新信号状态（NEW → QUEUED / SKIPPED / DEFERRED 等）。"""
