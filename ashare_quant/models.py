@@ -119,6 +119,16 @@ def utc_now_text() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat(sep=" ")
 
 
+def beijing_now_text() -> str:
+    """返回**北京时间**的 ``YYYY-MM-DD HH:MM:SS``（无时区标记）。
+
+    凡是会**直接展示给用户**的时间字段都用它（风险事件、成交流水等）；
+    纯审计字段（``created_at``/``updated_at``）继续用 :func:`utc_now_text`。
+    混用会导致看板上的时间相差 8 小时、看起来像系统半夜在交易。
+    """
+    return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None, microsecond=0).isoformat(sep=" ")
+
+
 def market_open_fill_time(trade_date: str, order_id: str) -> str:
     """为模拟盘按开盘价撮合的成交生成 ``YYYY-MM-DD 09:30:SS`` 形式的时间字符串。
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .config import Settings
 from .database import Database
-from .models import OrderRequest, OrderSide, utc_now_text
+from .models import OrderRequest, OrderSide, beijing_now_text
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class RiskManager:
             return
         self.database.execute(
             "UPDATE risk_state SET failure_count=0,daily_open_blocked=0,paused=0,last_reset_date=?,updated_at=? WHERE account_id='paper'",
-            (trade_date, utc_now_text()),
+            (trade_date, beijing_now_text()),
         )
 
     def pre_trade_check(self, request: OrderRequest, estimate_price: float) -> RiskDecision:
@@ -86,7 +86,7 @@ class RiskManager:
             return
         loss = float(account["total_equity"]) / float(baseline["total_equity"]) - 1
         if loss <= -float(self.settings.risk["daily_loss_stop"]):
-            self.database.execute("UPDATE risk_state SET daily_open_blocked=1,updated_at=? WHERE account_id='paper'", (utc_now_text(),))
+            self.database.execute("UPDATE risk_state SET daily_open_blocked=1,updated_at=? WHERE account_id='paper'", (beijing_now_text(),))
             self.record_event("WARNING", "DAILY_LOSS", f"当日亏损 {loss:.2%}，已停止新开仓")
 
     def record_failure(self, message: str, code: str = "") -> None:
@@ -96,18 +96,31 @@ class RiskManager:
         paused = int(failures >= int(self.settings.risk["max_consecutive_failures"]))
         self.database.execute(
             "UPDATE risk_state SET failure_count=?,paused=?,updated_at=? WHERE account_id='paper'",
-            (failures, paused, utc_now_text()),
+            (failures, paused, beijing_now_text()),
         )
         category = "EXECUTION_PAUSED" if paused else "EXECUTION_FAILURE"
         self.record_event("ERROR", category, message, code)
 
     def record_success(self) -> None:
         """成交成功后清零连续失败计数。"""
-        self.database.execute("UPDATE risk_state SET failure_count=0,updated_at=? WHERE account_id='paper'", (utc_now_text(),))
+        self.database.execute("UPDATE risk_state SET failure_count=0,updated_at=? WHERE account_id='paper'", (beijing_now_text(),))
+
+    def resume_trading(self) -> None:
+        """手动解除连续失败熔断（清零失败计数与暂停标志）。
+
+        供看板「风险监控」页的管理员按钮调用：确认外部故障已排除后可立即恢复，
+        不必等下一个交易日的 ``reset_for_new_day``。**不**清 ``daily_open_blocked``——
+        日亏损停开仓是另一道独立风控，仍按新交易日自动重置。
+        """
+        self.database.execute(
+            "UPDATE risk_state SET failure_count=0,paused=0,updated_at=? WHERE account_id='paper'",
+            (beijing_now_text(),),
+        )
+        self.record_event("WARNING", "RISK_RESUMED", "手动解除交易暂停，连续失败计数已清零")
 
     def record_event(self, level: str, category: str, message: str, code: str = "") -> None:
         """写一条风险事件到 risk_events 表（供看板/审计回溯）。"""
         self.database.execute(
             "INSERT INTO risk_events(event_time,level,category,message,code) VALUES(?,?,?,?,?)",
-            (utc_now_text(), level, category, message, code),
+            (beijing_now_text(), level, category, message, code),
         )

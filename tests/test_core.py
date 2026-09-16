@@ -265,6 +265,29 @@ def test_filter_candidates_by_quality():
     assert kept == ["600000"]
 
 
+def test_risk_events_utc_rows_migrated_to_beijing_once(tmp_path: Path):
+    """risk_events.event_time 原来写 UTC，部署后首次启动应把存量行 +8h，且只迁移一次。"""
+    database = Database(tmp_path / "tz.db")
+    database.ensure_schema()  # 只建表、不写迁移标记，模拟「老库还没升级过」
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO risk_events(event_time,level,category,message,code) "
+            "VALUES('2026-09-16 02:31:25','ERROR','EXECUTION_PAUSED','可用现金不足','002487')"
+        )
+
+    database.initialize(1_000_000)  # 云端部署后的首次启动
+    assert (
+        database.query_one("SELECT event_time FROM risk_events")["event_time"]
+        == "2026-09-16 10:31:25"
+    )
+
+    database.initialize(1_000_000)  # 幂等：不得再 +8
+    assert (
+        database.query_one("SELECT event_time FROM risk_events")["event_time"]
+        == "2026-09-16 10:31:25"
+    )
+
+
 def test_builtin_strategy_templates():
     from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, BUILTIN_STRATEGY_TEMPLATES
 

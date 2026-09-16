@@ -199,6 +199,122 @@ def test_intraday_rejects_limit_up_buy(tmp_path: Path):
     assert "涨停拦截" in order["error"]
 
 
+def test_limit_up_rejection_does_not_trip_circuit_breaker(tmp_path: Path):
+    """涨停买不进是市场性拒单，不计入连续失败熔断（曾连刷 3 次把交易暂停）。"""
+    settings, database, _broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    bar = database.query_one(
+        "SELECT close, pre_close FROM daily_bars WHERE code='600000' ORDER BY trade_date DESC LIMIT 1"
+    )
+    limit_price = round(float(bar["pre_close"] or bar["close"]) * 1.10, 2)
+
+    trading.execute_intraday(
+        quotes={"600000": _quote(limit_price, day)},
+        candidates=_candidates([("600000", "浦发银行", limit_price, 8.0e8)]),
+    )
+
+    state = database.query_one("SELECT failure_count, paused FROM risk_state WHERE account_id='paper'")
+    assert int(state["failure_count"]) == 0
+    assert not state["paused"]
+    events = database.query_all(
+        "SELECT * FROM risk_events WHERE code='600000' AND category='ORDER_REJECTED'"
+    )
+    assert events, "拒单仍要留审计记录（级别=警告）"
+    assert events[0]["level"] == "WARNING"
+
+
+def test_intraday_rejected_symbol_not_retried_same_day(tmp_path: Path):
+    """被拒的标的不在同一交易日的后续时点反复重试（否则会连刷失败触发熔断）。"""
+    _settings, database, _broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    bar = database.query_one(
+        "SELECT close, pre_close FROM daily_bars WHERE code='600000' ORDER BY trade_date DESC LIMIT 1"
+    )
+    limit_price = round(float(bar["pre_close"] or bar["close"]) * 1.10, 2)
+    quotes = {"600000": _quote(limit_price, day)}
+    candidates = _candidates([("600000", "浦发银行", limit_price, 8.0e8)])
+
+    trading.execute_intraday(quotes=quotes, candidates=candidates)
+    trading.execute_intraday(quotes=quotes, candidates=candidates)
+
+    orders = database.query_all("SELECT * FROM orders WHERE code='600000' AND side='BUY'")
+    assert len(orders) == 1, "同一交易日内被拒的标的不应再次下单"
+
+
+def test_intraday_buy_skipped_when_cash_cannot_afford_one_lot(tmp_path: Path):
+    """可用现金买不起一手时直接不下单，而不是提交后被拒、再计一次失败。"""
+    settings, database, broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    price = _latest_close(database, "600000")
+    # 现金远低于一手（约 1300 元），但总资产正常 —— 旧口径按总资产定量必然被拒
+    database.execute(
+        "UPDATE account_state SET cash=1000, total_equity=1000000 WHERE account_id='paper'"
+    )
+
+    outcome = trading.execute_intraday(
+        quotes={"600000": _quote(price, day)},
+        candidates=_candidates([("600000", "浦发银行", price, 8.0e8)]),
+    )
+
+    assert outcome["buy_filled"] == 0
+    assert database.query_all("SELECT * FROM orders") == []
+    state = database.query_one("SELECT failure_count, paused FROM risk_state WHERE account_id='paper'")
+    assert int(state["failure_count"]) == 0
+    assert not state["paused"]
+
+
+def test_intraday_buy_amount_capped_by_available_cash(tmp_path: Path):
+    """买入金额必须用可用现金封顶：持仓升值后现金不足 20% 总资产也能成交。"""
+    settings, database, broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    price = _latest_close(database, "600000")
+    database.execute(
+        "UPDATE account_state SET cash=20000, total_equity=1000000 WHERE account_id='paper'"
+    )
+
+    outcome = trading.execute_intraday(
+        quotes={"600000": _quote(price, day)},
+        candidates=_candidates([("600000", "浦发银行", price, 8.0e8)]),
+    )
+
+    assert outcome["buy_filled"] == 1
+    fill = database.query_one("SELECT * FROM fills WHERE code='600000'")
+    gross = float(fill["quantity"]) * float(fill["price"])
+    assert gross <= 20000, f"成交金额 {gross} 不得超过可用现金 20000"
+
+
+def test_resume_trading_clears_pause(tmp_path: Path):
+    """看板「解除交易暂停」应清零失败计数与暂停标志，并留审计事件。"""
+    settings, database, _broker, _signals, _trading = make_services(tmp_path)
+    risk = RiskManager(database, settings)
+    for _ in range(3):
+        risk.record_failure("模拟故障")
+    assert risk.database.query_one("SELECT paused FROM risk_state WHERE account_id='paper'")["paused"]
+
+    risk.resume_trading()
+
+    state = database.query_one("SELECT failure_count, paused FROM risk_state WHERE account_id='paper'")
+    assert int(state["failure_count"]) == 0
+    assert not state["paused"]
+    event = database.query_one("SELECT * FROM risk_events WHERE category='RISK_RESUMED'")
+    assert event, "解除动作要留审计记录"
+
+
+def test_risk_events_use_beijing_time(tmp_path: Path):
+    """风险事件时间必须是北京时间——之前写的是 UTC，看板上看起来像系统半夜在交易。"""
+    from datetime import datetime, timedelta, timezone
+
+    settings, database, _broker, _signals, _trading = make_services(tmp_path)
+    RiskManager(database, settings).record_event("WARNING", "TEST", "时区校验")
+
+    event = database.query_one("SELECT * FROM risk_events WHERE category='TEST'")
+    written = datetime.strptime(event["event_time"], "%Y-%m-%d %H:%M:%S")
+    now_bj = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
+    assert abs((now_bj - written).total_seconds()) < 600, (
+        f"风险事件时间 {event['event_time']} 与北京时间 {now_bj} 相差超过 10 分钟"
+    )
+
+
 def test_fresh_quotes_drops_stale_and_invalid_rows():
     """market_quotes 不会自动过期，交易前必须按 quote_time 剔除当日未刷新的残留价。"""
     day = "2026-09-11"

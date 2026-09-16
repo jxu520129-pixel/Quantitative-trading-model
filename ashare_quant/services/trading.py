@@ -211,10 +211,19 @@ class TradingService:
         target_weight = min(
             1.0 / max_positions, float(self.settings.risk["max_single_position_weight"])
         )
-        # 留出成交价波动、滑点与最低佣金的余量
-        target_value = account.total_equity * target_weight * 0.995
-        quantity = round_to_lot(target_value / price)
+        # 目标金额按「总资产 × 单票权重」定，但**必须用可用现金封顶**：
+        # 持仓升值后现金往往已低于 20% 总资产，只按总资产定量会被风控以「可用现金不足」拒单，
+        # 盘中 5 个时点反复被拒就会刷爆连续失败熔断（曾因此把交易暂停）。
+        target_value = min(
+            account.total_equity * target_weight, float(account.cash) * 0.98
+        ) * 0.995
+        quantity = round_to_lot(max(0.0, target_value) / price)
         if quantity <= 0:
+            # 现金买不起一手：直接不下单（而不是提交后被风控拒掉、再计一次失败）
+            LOG.info(
+                "跳过买入 %s：可用现金 ¥%.2f 不足以按目标权重 %.0f%% 买入一手（现价 %.2f）",
+                pick["code"], account.cash, target_weight * 100, price,
+            )
             return ""
         return self.broker.submit_order(OrderRequest(
             code=pick["code"], name=pick["name"], side=OrderSide.BUY, quantity=quantity,
@@ -250,10 +259,13 @@ class TradingService:
         if not hits:
             return []
         held = set(positions)
+        # 去重必须包含 **REJECTED**：被风控/涨跌停拒掉的标的若不排除，
+        # 下一个盘中时点会被再次选中、再次被拒——同一只买不进的股能连刷 3 次失败，
+        # 直接触发「连续 3 次执行失败」熔断把交易暂停（2026-09-16 实际发生过）。
         ordered_today = {
             row["code"] for row in self.database.query_all(
                 "SELECT DISTINCT code FROM orders WHERE side='BUY' AND trade_date=? "
-                "AND status IN ('PENDING','FILLED')",
+                "AND status IN ('PENDING','FILLED','REJECTED')",
                 (trade_date,),
             )
         }

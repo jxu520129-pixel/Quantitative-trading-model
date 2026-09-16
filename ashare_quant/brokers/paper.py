@@ -120,14 +120,16 @@ class PaperBroker(Broker):
                     else:
                         limit_price = round(pre_close * (1 - limit_pct), 2)
                         detail = (f"跌停拦截 {order['code']}：成交价{open_price:.2f} ≤ 跌停价{limit_price:.2f}（昨收{pre_close:.2f}，{limit_pct:.0%}跌停）")
-                    self._reject(order, detail)
+                    self._reject(order, detail, count_as_failure=False)
                     outcome["rejected"] += 1
                     continue
                 self._fill(order, bar, trade_date, filled_at=filled_at)
                 self.risk.record_success()
                 outcome["filled"] += 1
             except ValueError as error:
-                self._reject(order, str(error))
+                # 风控/资金类的**预期拒单**（现金不足、仓位超限、T+1 等）：
+                # 这是风控在正常工作，不计入连续失败熔断——否则盘中 5 个时点会把熔断刷爆。
+                self._reject(order, str(error), count_as_failure=False)
                 outcome["rejected"] += 1
             except Exception as error:  # Preserve order history and trip failure circuit if execution itself breaks.
                 self.database.execute(
@@ -233,12 +235,22 @@ class PaperBroker(Broker):
                  filled_at or market_open_fill_time(trade_date, order["id"])),
             )
 
-    def _reject(self, order: dict[str, Any], message: str) -> None:
-        """把委托标记为 REJECTED 并累计一次失败（用于熔断计数）。"""
+    def _reject(self, order: dict[str, Any], message: str, count_as_failure: bool = True) -> None:
+        """把委托标记为 REJECTED。
+
+        ``count_as_failure=True``（默认）用于**系统/数据**层面的失败（没有行情数据、
+        撮合抛异常），会计入连续失败熔断；
+        ``False`` 用于**风控或市场**层面的正常拒单（涨跌停、现金不足、仓位超限、T+1）——
+        这些是风控在正常工作，只记 WARNING 事件、不计熔断。
+        之前把涨跌停拒单也计入熔断，结果盘中 5 个时点刷满 3 次「涨停买不进」就把交易停了。
+        """
         self.database.execute(
             "UPDATE orders SET status='REJECTED',error=?,updated_at=? WHERE id=?", (message, utc_now_text(), order["id"])
         )
-        self.risk.record_failure(message, order["code"])
+        if count_as_failure:
+            self.risk.record_failure(message, order["code"])
+        else:
+            self.risk.record_event("WARNING", "ORDER_REJECTED", message, order["code"])
 
     def mark_to_market(self, trade_date: str) -> Account:
         """Mark current positions at close, update account state and upsert a daily snapshot."""

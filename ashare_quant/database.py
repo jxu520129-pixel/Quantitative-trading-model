@@ -195,6 +195,19 @@ class Database:
                 # 旧持仓无建仓期箱体基准，用成本价兜底（跌破成本即触发箱体离场）
                 conn.execute("ALTER TABLE positions ADD COLUMN entry_breakout REAL NOT NULL DEFAULT 0")
                 conn.execute("UPDATE positions SET entry_breakout=avg_cost WHERE entry_breakout<=0")
+            # 一次性数据迁移：risk_events.event_time 此前写的是 UTC，而看板直接原样展示，
+            # 结果比北京时间早 8 小时——风险事件看起来像系统凌晨在交易（2026-09-16 用户反馈）。
+            # risk.py 已改写北京时间，这里把存量行整体 +8h；用 system_settings 标记保证只跑一次。
+            tz_marker = conn.execute(
+                "SELECT value FROM system_settings WHERE key='risk_events_tz_migrated'"
+            ).fetchone()
+            if not tz_marker:
+                conn.execute("UPDATE risk_events SET event_time=datetime(event_time,'+8 hours')")
+                conn.execute(
+                    "INSERT INTO system_settings(key,value,updated_at) VALUES('risk_events_tz_migrated','1',?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                    (utc_now_text(),),
+                )
             now = utc_now_text()
             conn.execute(
                 "INSERT OR IGNORE INTO account_state(account_id,cash,market_value,total_equity,updated_at) VALUES(?,?,?,?,?)",

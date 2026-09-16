@@ -813,6 +813,20 @@ with signals_tab:
 with risk_tab:
     st.subheader("当前风控状态")
     st.dataframe(localize_dataframe(pd.DataFrame([risk_state])), width="stretch", hide_index=True)
+    if is_admin and (risk_state.get("paused") or int(risk_state.get("failure_count") or 0) > 0):
+        st.warning(
+            "连续失败熔断已触发：**暂停新开仓**（持仓的止损止盈不受影响，仍正常执行）。"
+            "若确认是外部行情/数据问题已恢复，可手动解除；否则等下一交易日 09:26 自动重置。"
+        )
+        if st.button(
+            "解除交易暂停并清零失败计数",
+            key="risk_resume",
+            type="primary",
+            help="仅清 failure_count 与 paused，不影响日亏损停开仓（daily_open_blocked）。",
+        ):
+            app.risk.resume_trading()
+            st.cache_data.clear()
+            st.rerun()
     st.subheader("风险事件")
     st.dataframe(localize_dataframe(frame("SELECT event_time,level,category,code,message FROM risk_events ORDER BY id DESC LIMIT 200")), width="stretch", hide_index=True)
 with backtest_tab:
