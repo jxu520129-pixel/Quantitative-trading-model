@@ -8,6 +8,27 @@ from dataclasses import dataclass
 LOT_SIZE = 100
 
 
+def board_of_code(code: str) -> str:
+    """按 6 位代码前缀判断上市板块。
+
+    ``stock_basic.board`` 字段不可靠（数据源恒写 ``MAIN``），所以板块判断直接看代码前缀：
+    - ``688`` → 科创板；``300/301`` → 创业板；
+    - ``4/8`` 开头、或 ``92`` 开头 → 北交所（含老三板 43xxxx / 北交所 83/87/88/920xxx）；
+    - ``5/1`` 开头 → 基金/ETF；其余 → 主板。
+    用于盘中买点扫描的「允许买入板块」过滤。
+    """
+    code = str(code).zfill(6)
+    if code.startswith(("5", "1")):
+        return "基金"
+    if code.startswith("68"):
+        return "科创板"
+    if code.startswith(("30", "31")):
+        return "创业板"
+    if code.startswith(("4", "8")) or code.startswith("92"):
+        return "北交所"
+    return "主板"
+
+
 @dataclass(frozen=True)
 class TradingCosts:
     """A 股交易费用参数（佣金、印花税、滑点），回测与模拟盘共用。"""

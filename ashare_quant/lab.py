@@ -19,7 +19,7 @@ import pandas as pd
 
 from .hot_strategy import HOT_STRATEGY_NAME
 from .limit_pullback_strategy import LIMIT_STRATEGY_NAME
-from .market_rules import TradingCosts, round_to_lot
+from .market_rules import TradingCosts, board_of_code, round_to_lot
 
 
 LOG = logging.getLogger(__name__)
@@ -693,6 +693,7 @@ def find_buy_candidates(
     min_average_volume: float | None = None,
     strategy_names: list[str] | None = None,
     exclude_prefix: str | None = None,
+    allowed_boards: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """扫描已保存策略，找出最新日线上符合买入条件的股票。
 
@@ -720,6 +721,10 @@ def find_buy_candidates(
     for row in universe.itertuples(index=False):
         frame = loaded.get(row.code)
         if frame is None or frame.empty or len(frame) < 20:
+            continue
+        # 板块过滤：看板可配置「允许买入的板块」（主板/创业板/科创板/北交所/基金），
+        # 不允许的板块直接跳过。board 字段不可靠，用代码前缀判断。
+        if allowed_boards is not None and board_of_code(row.code) not in allowed_boards:
             continue
         realtime = False
         quote = current_quotes.get(row.code) if current_quotes else None
@@ -1234,6 +1239,37 @@ def filter_candidates_by_metrics(
     return filtered
 
 
+def effective_scan_filters(database: Any, settings: Any) -> dict[str, Any]:
+    """合并 `config` 默认值与看板 `system_settings` 的盘中买点过滤条件（**看板值优先**）。
+
+    看板「因子实验室 → 盘中买点扫描」里改的价格区间 / 允许板块会写入 `system_settings`，
+    与调度器进程共享同一份 SQLite，因此**页面改多少、盘中交易就按多少执行**；未在页面改过
+    的项回退到 `config/default.yaml` 的 `scan` 默认值。返回：
+
+    ``{"max_price", "min_price", "allowed_boards"}``，其中 ``allowed_boards`` 为 ``set`` 或 ``None``
+    （``None`` = 不过滤板块）。
+    """
+    scan = dict(settings.raw.get("scan", {}) or {})
+
+    def _num(key: str, default: float | None) -> float | None:
+        row = database.query_one("SELECT value FROM system_settings WHERE key=?", (key,))
+        if row and str(row["value"]).strip() != "":
+            try:
+                return float(str(row["value"]))
+            except ValueError:
+                pass
+        return default
+
+    max_price = _num("scan_max_price", scan.get("max_price"))
+    min_price = _num("scan_min_price", scan.get("min_price"))
+
+    boards_row = database.query_one("SELECT value FROM system_settings WHERE key='scan_boards'")
+    allowed_boards: set[str] | None = None
+    if boards_row and str(boards_row["value"]).strip():
+        allowed_boards = {b.strip() for b in str(boards_row["value"]).split(",") if b.strip()}
+    return {"max_price": max_price, "min_price": min_price, "allowed_boards": allowed_boards}
+
+
 def scan_buy_candidates(
     data_service: Any,
     database: Any,
@@ -1245,20 +1281,21 @@ def scan_buy_candidates(
 
     返回 ``{"candidates", "notices", "sector", "sector_changes", "industries", "rejected_by"}``。
     ``candidates`` 是 ``find_buy_candidates`` 的原结构（``[{"strategy","entry_desc","exit_desc","matches"}]``），
-    已剔除价格区间 / 流动性 / 板块弱势 / 负面公告 / 非热股 / 财务指标不符的标的；
+    已剔除价格区间 / 板块 / 流动性 / 板块弱势 / 负面公告 / 非热股 / 财务指标不符的标的；
     ``rejected_by`` 非空表示候选被某一道过滤清空（其文案原样用于邮件报告）。
 
     把「扫描候选」与「格式化报告」拆开的原因：盘中即时下单必须买**报告里展示的那批股票**，
     否则会出现「邮件里没有、账户却买了」的口径不一致。
     """
-    scan_cfg = data_service.settings.raw.get("scan", {})
+    filters = effective_scan_filters(database, data_service.settings)
     candidates = find_buy_candidates(
         data_service, database, current_quotes=current_quotes,
-        max_price=float(scan_cfg.get("max_price", 0) or 0) or None,
-        min_price=float(scan_cfg.get("min_price", 0) or 0) or None,
-        min_average_amount=float(scan_cfg.get("min_average_amount", 0) or 0) or None,
-        min_average_volume=float(scan_cfg.get("min_average_volume", 0) or 0) or None,
+        max_price=filters["max_price"],
+        min_price=filters["min_price"],
+        min_average_amount=float(data_service.settings.raw.get("scan", {}).get("min_average_amount", 0) or 0) or None,
+        min_average_volume=float(data_service.settings.raw.get("scan", {}).get("min_average_volume", 0) or 0) or None,
         strategy_names=strategy_names, exclude_prefix=exclude_prefix,
+        allowed_boards=filters["allowed_boards"],
     )
     result: dict[str, Any] = {
         "candidates": candidates, "notices": {}, "sector": "", "sector_changes": {},

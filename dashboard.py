@@ -467,6 +467,46 @@ with lab_tab:
     # ── 盘中买点扫描 ──
     with lab_scan:
         st.caption("扫描「策略定义」中已勾选启用的策略，命中即推送邮件/企业微信。")
+        # ── 盘中买入过滤条件（持久化到 system_settings，与调度器进程共享同一份） ──
+        _BOARDS = ["主板", "创业板", "科创板", "北交所", "基金"]
+        _scan_cfg = app.settings.raw.get("scan", {})
+
+        def _as_float(text, default):
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                try:
+                    return float(default)
+                except (TypeError, ValueError):
+                    return 0.0
+
+        saved_max = _as_float(app.control.get("scan_max_price", ""), _scan_cfg.get("max_price", 50))
+        saved_min = _as_float(app.control.get("scan_min_price", ""), _scan_cfg.get("min_price", 5))
+        saved_boards = [
+            b for b in (app.control.get("scan_boards", "") or ",".join(_BOARDS)).split(",")
+            if b in _BOARDS
+        ] or list(_BOARDS)
+
+        with st.expander("盘中买入过滤条件（修改即保存，盘中交易按此执行，无需改代码）", expanded=False):
+            c1, c2 = st.columns(2)
+            ui_max = c1.number_input("股价上限（元，0=不限）", min_value=0.0, value=saved_max, step=1.0,
+                                     disabled=not is_admin, key="scan_max_price_input")
+            ui_min = c2.number_input("股价下限（元，0=不限）", min_value=0.0, value=saved_min, step=1.0,
+                                     disabled=not is_admin, key="scan_min_price_input")
+            ui_boards = st.multiselect("允许买入的板块（去掉某板块即不买入）", _BOARDS,
+                                       default=saved_boards, disabled=not is_admin, key="scan_boards_input")
+            if is_admin:
+                if ui_max != saved_max:
+                    app.control.set("scan_max_price", str(ui_max))
+                if ui_min != saved_min:
+                    app.control.set("scan_min_price", str(ui_min))
+                if sorted(ui_boards) != sorted(saved_boards):
+                    app.control.set("scan_boards", ",".join(ui_boards))
+                st.caption(
+                    f"已生效：股价 {ui_min:.2f} ~ {ui_max:.2f} 元，允许板块 = {'、'.join(ui_boards) or '无'}。"
+                    "这些值写入数据库，与 config/default.yaml 的 scan 默认值合并（页面未改的项用文件默认值）。"
+                )
+
         if st.button("立即扫描买点", disabled=not is_admin):
             with st.spinner("正在拉取实时行情、公告与板块数据..."):
                 try:

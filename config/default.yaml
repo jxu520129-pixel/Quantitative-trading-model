@@ -85,6 +85,9 @@ model:
   retrain_sample_symbols: 300
 
 scan:
+  # 注意：max_price / min_price 与「允许买入的板块」可在看板
+  # 「因子实验室 → 盘中买点扫描 → 盘中买入过滤条件」里直接改，改后写入 system_settings、
+  # 覆盖这里的默认值（调度器进程读同一份）。此处的值是**初始默认值**。
   max_price: 50                  # 价格上限（元）
   min_price: 5                   # 价格下限（元）
   min_average_amount: 100000000  # 近20日平均成交额下限（元）；全A股回测：1亿过滤小盘股→年化19.3%、回撤17.1%
