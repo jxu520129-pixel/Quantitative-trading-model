@@ -1242,32 +1242,35 @@ def filter_candidates_by_metrics(
 def effective_scan_filters(database: Any, settings: Any) -> dict[str, Any]:
     """合并 `config` 默认值与看板 `system_settings` 的盘中买点过滤条件（**看板值优先**）。
 
-    看板「因子实验室 → 盘中买点扫描」里改的价格区间 / 允许板块会写入 `system_settings`，
-    与调度器进程共享同一份 SQLite，因此**页面改多少、盘中交易就按多少执行**；未在页面改过
-    的项回退到 `config/default.yaml` 的 `scan` 默认值。返回：
+    返回**完整的 scan 配置字典**（`config/default.yaml` 的 `scan` + 看板覆盖后的
+    `max_price`/`min_price`），并额外带上 ``allowed_boards``（``set`` 或 ``None``=不过滤板块）。
+    返回完整字典是有意的：扫描链路的所有键都从这一处取，否则会出现
+    「一半走页面、一半走文件」的口径分裂（曾因此漏掉变量定义，报
+    ``NameError: name 'scan_cfg' is not defined``，扫描直接失败）。
 
-    ``{"max_price", "min_price", "allowed_boards"}``，其中 ``allowed_boards`` 为 ``set`` 或 ``None``
-    （``None`` = 不过滤板块）。
+    看板「因子实验室 → 盘中买点扫描」改的值写入 `system_settings`，与调度器进程共享
+    同一份 SQLite，因此**页面改多少、盘中交易就按多少执行**；未改的项回退 config 默认值。
     """
     scan = dict(settings.raw.get("scan", {}) or {})
 
-    def _num(key: str, default: float | None) -> float | None:
+    def _num(key: str, default):
         row = database.query_one("SELECT value FROM system_settings WHERE key=?", (key,))
         if row and str(row["value"]).strip() != "":
             try:
                 return float(str(row["value"]))
             except ValueError:
-                pass
+                return default
         return default
 
-    max_price = _num("scan_max_price", scan.get("max_price"))
-    min_price = _num("scan_min_price", scan.get("min_price"))
+    scan["max_price"] = _num("scan_max_price", scan.get("max_price"))
+    scan["min_price"] = _num("scan_min_price", scan.get("min_price"))
 
     boards_row = database.query_one("SELECT value FROM system_settings WHERE key='scan_boards'")
     allowed_boards: set[str] | None = None
     if boards_row and str(boards_row["value"]).strip():
         allowed_boards = {b.strip() for b in str(boards_row["value"]).split(",") if b.strip()}
-    return {"max_price": max_price, "min_price": min_price, "allowed_boards": allowed_boards}
+    scan["allowed_boards"] = allowed_boards
+    return scan
 
 
 def scan_buy_candidates(
@@ -1286,16 +1289,20 @@ def scan_buy_candidates(
 
     把「扫描候选」与「格式化报告」拆开的原因：盘中即时下单必须买**报告里展示的那批股票**，
     否则会出现「邮件里没有、账户却买了」的口径不一致。
+
+    过滤条件统一取自 :func:`effective_scan_filters`（config 默认值 + 看板覆盖），
+    **不要**在这里单独读 `settings.raw["scan"]`——那会造成「一半走页面、一半走文件」的口径分裂，
+    也曾因此漏掉变量定义、扫描直接报 ``NameError: name 'scan_cfg' is not defined``。
     """
-    filters = effective_scan_filters(database, data_service.settings)
+    scan_cfg = effective_scan_filters(database, data_service.settings)
     candidates = find_buy_candidates(
         data_service, database, current_quotes=current_quotes,
-        max_price=filters["max_price"],
-        min_price=filters["min_price"],
-        min_average_amount=float(data_service.settings.raw.get("scan", {}).get("min_average_amount", 0) or 0) or None,
-        min_average_volume=float(data_service.settings.raw.get("scan", {}).get("min_average_volume", 0) or 0) or None,
+        max_price=float(scan_cfg.get("max_price", 0) or 0) or None,
+        min_price=float(scan_cfg.get("min_price", 0) or 0) or None,
+        min_average_amount=float(scan_cfg.get("min_average_amount", 0) or 0) or None,
+        min_average_volume=float(scan_cfg.get("min_average_volume", 0) or 0) or None,
         strategy_names=strategy_names, exclude_prefix=exclude_prefix,
-        allowed_boards=filters["allowed_boards"],
+        allowed_boards=scan_cfg.get("allowed_boards"),
     )
     result: dict[str, Any] = {
         "candidates": candidates, "notices": {}, "sector": "", "sector_changes": {},

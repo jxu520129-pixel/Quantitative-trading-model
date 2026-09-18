@@ -21,7 +21,11 @@ from ashare_quant.config import load_settings
 from ashare_quant.data.seed import seed_demo_market
 from ashare_quant.data.service import DataService
 from ashare_quant.database import Database
-from ashare_quant.lab import effective_scan_filters, find_buy_candidates
+from ashare_quant.lab import (
+    effective_scan_filters,
+    find_buy_candidates,
+    scan_buy_candidates,
+)
 from ashare_quant.market_rules import board_of_code
 from ashare_quant.models import utc_now_text
 from ashare_quant.notifications import NotificationHub
@@ -101,3 +105,51 @@ def test_scan_board_filter_excludes_disallowed_board(tmp_path: Path):
     # 只允许主板 → 有候选
     main_only = find_buy_candidates(data, database, allowed_boards={"主板"})
     assert any(item["matches"] for item in main_only)
+
+
+def _register_always_match(database) -> None:
+    """注册一个恒真策略（rally_5 > -100%），让演示股全部命中，便于走到后续过滤。"""
+    database.execute(
+        "INSERT INTO signal_strategies(id,name,entry_json,exit_json,created_at,enabled) "
+        "VALUES(?,?,?,?,?,?)",
+        ("s", "全市场", json.dumps({"conditions": [{"factor": "rally_5", "op": ">", "value": -1}], "combine": "AND"}),
+         json.dumps({"conditions": [], "combine": "OR"}), utc_now_text(), 1),
+    )
+
+
+def test_scan_buy_candidates_with_candidates_does_not_crash(tmp_path: Path, monkeypatch):
+    """回归：曾因删掉 scan_cfg 变量，**有候选**时报 ``NameError: name 'scan_cfg' is not defined``。
+
+    无候选会在指标过滤前提前 return，所以必须造出候选才能复现；
+    本地无 akshare，公告/板块/行业/指标四个网络函数打桩。
+    """
+    import ashare_quant.lab as lab
+
+    monkeypatch.setattr(lab, "fetch_recent_notices", lambda: {})
+    monkeypatch.setattr(lab, "fetch_sector_summary", lambda: ("", {}))
+    monkeypatch.setattr(lab, "fetch_industries", lambda db, codes: {})
+    monkeypatch.setattr(lab, "fetch_stock_metrics", lambda: {})
+
+    settings, database, data = make_services(tmp_path)
+    _register_always_match(database)
+
+    result = scan_buy_candidates(data, database)
+    assert any(item["matches"] for item in result["candidates"])
+
+
+def test_scan_buy_candidates_applies_ui_board_filter(tmp_path: Path, monkeypatch):
+    """端到端：看板写入 system_settings 的板块名单，要真正作用到 scan_buy_candidates。"""
+    import ashare_quant.lab as lab
+
+    monkeypatch.setattr(lab, "fetch_recent_notices", lambda: {})
+    monkeypatch.setattr(lab, "fetch_sector_summary", lambda: ("", {}))
+    monkeypatch.setattr(lab, "fetch_industries", lambda db, codes: {})
+    monkeypatch.setattr(lab, "fetch_stock_metrics", lambda: {})
+
+    settings, database, data = make_services(tmp_path)
+    _register_always_match(database)
+    # 演示股全是主板；只允许科创板 → 无候选
+    SystemControl(database).set("scan_boards", "科创板")
+
+    result = scan_buy_candidates(data, database)
+    assert all(not item["matches"] for item in result["candidates"])
