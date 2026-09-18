@@ -659,14 +659,14 @@ docker exec ashare-quant-scheduler-1 python scripts/fetch_hist_data.py --start 2
 python -m pytest -q
 ```
 
-测试使用临时 SQLite 和演示行情，共 **87 个用例**，覆盖：
+测试使用临时 SQLite 和演示行情，共 **89 个用例**，覆盖：
 
 - **基础规则**：费用/整手/涨停规则、信号到模拟成交、Backtrader 回测落库（`tests/test_core.py`）。
 - **多策略并行**的独立买卖与止损止盈（`tests/test_multi_strategy.py`：策略只平自己买入的仓、同股只买一次、跨策略名额分配、涨停过滤只作用于买入、建仓记账、旧库迁移、策略解析兜底）。
 - **盘中即时交易**（`tests/test_intraday_trading.py`）：买点当天成交、委托不跨日、成交时间记真实时刻、T+1 仍生效、止损按实时价即时卖出、单日新开名额跨时点共享、同一交易日不重复买同一只、行情不可用时**零成交**、盘中不追涨停、`fresh_quotes` 剔除残留旧价、**手动平仓当场成交且不跨日/无行情退回收盘价/T+1 明确报错**，以及**调度器注册验收**（现场 stub `BlockingScheduler`，断言注册了 5 个 `intraday_trade_HHMM` 且**没有** `intraday_trade_1530`、也没有旧的 `buy_scan_*`）。
 - **事件→个股匹配**（`tests/test_industry_matching.py`）：歧义词参数化断言（黄金发展期/无锡/种子轮/面板数据…）、事件分类 `event_type` 兜底、利空事件只给板块不给个股、多行业后备池跨行业分散，以及端到端 HTML 断言（只出现医药股、绝不出现稀土股）。
 - **风控与熔断**：涨跌停/现金不足等**预期拒单不计入连续失败熔断**、被拒标的当日不重试、买入金额用可用现金封顶、现金不足一手直接跳过、手动解除暂停、风险事件时间为北京时间、存量 UTC 记录一次性迁移（`tests/test_core.py` 与 `tests/test_intraday_trading.py`）。
-- **盘中买点过滤条件**（`tests/test_scan_filters.py`）：`board_of_code` 代码前缀→板块映射（含 688/300/301/4/8/92 前缀）、`effective_scan_filters` 的 system_settings 覆盖 + config 兜底 + 跨进程沿用、板块过滤真正作用到候选扫描（允许名单外的一只都不出）。
+- **盘中买点过滤条件**（`tests/test_scan_filters.py`）：`board_of_code` 代码前缀→板块映射（含 688/300/301/4/8/92 前缀）、`effective_scan_filters` 的 system_settings 覆盖 + config 兜底 + 跨进程沿用、板块过滤真正作用到候选扫描（允许名单外的一只都不出）、**有候选时扫描不崩**（回归 `NameError: name 'scan_cfg' is not defined`）与页面板块名单端到端生效。
 - **看板设置持久化**：刷新间隔跨「重新登录」沿用、老库 `10` 秒一次性迁移为 30、用户主动选回 10 不被迁移覆盖，另有源码契约护栏防止默认值被改回 10。
 
 > 看板相关的 UI 行为（如下拉框默认值与落库）可用 `streamlit.testing.v1.AppTest` 无头验证：
