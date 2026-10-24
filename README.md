@@ -8,6 +8,10 @@
 
 > 只记改变**行为**或**数据口径**的改动，详细说明见下文对应章节。
 
+**2026-10-24**
+
+- **新增「AI 智能分析」看板页与 `ashare_quant/ai_analyst.py` 模块**。在看板新增「AI 智能分析」标签页：输入股票代码 + 自然语言问题，系统取实时价与历史日线、计算技术指标（MA5/10/20/60、RSI、MACD、近 5/20/60 日涨跌幅、量比、年化波动率），组装成上下文后调用大模型生成技术面分析。大模型配置复用 `fundamental.py` 的 `LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`（默认 DeepSeek，无需新增配置）；未配置 `LLM_API_KEY` 时页面提示、不影响其它功能。指标计算为纯 pandas 实现，不引入新依赖。→ 见「AI 智能分析」。
+
 **2026-09-18**
 
 - **盘中买点的「板块 / 价格」过滤可在看板直接改**。看板「因子实验室 → 盘中买点扫描」新增「盘中买入过滤条件」：股价上限/下限（0=不限）与「允许买入的板块」（去掉科创板/创业板/北交所等即不买入）。改完写入 `system_settings` 与调度器进程共享，**页面改多少、盘中交易就按多少执行**，未改的项回退 `config/default.yaml` 默认值。→ 见「盘中买点扫描与盘中即时成交」。
@@ -34,6 +38,7 @@
 │   ├── data/                       # AkShare/Tushare 数据源、缓存、演示数据
 │   ├── services/                   # 信号、交易编排、运行时与控制开关
 │   ├── strategies/                 # 因子库与各策略（动量/双均线/多因子等）
+│   ├── ai_analyst.py               # AI 智能分析（自然语言问股，大模型生成技术面分析）
 │   ├── backtest.py                 # Backtrader A 股回测
 │   ├── cli.py                      # 命令行入口
 │   ├── config.py                   # YAML 与环境变量配置
@@ -536,6 +541,25 @@ python -m ashare_quant.cli retrain-model
 ### VWAP 与资金行为字段（F17 日线代理）
 
 分钟级数据接入前的日线代理口径：**VWAP 偏离** = 收盘价 /（近 20 日成交额 ÷ 成交量）− 1；**量比** = 当日成交量 / 近 20 日均量；**成交额 z-score** = 当日成交额在近 20 日的标准化值。三者出现在候选卡片「资金行为」行，并作为主升概率模型的输入特征。
+
+## AI 智能分析
+
+看板「AI 智能分析」标签页提供自然语言问股能力，流程：**输入股票代码 + 问题 → 取实时价与历史日线 → 计算技术指标 → 组装上下文 → 调用大模型生成分析**。
+
+- **指标**：MA5/10/20/60、RSI(14)、MACD/DIF/DEA、近 5/20/60 日涨跌幅、近 60 日最高/最低、量比（近 5 日均量 / 近 60 日均量）、年化波动率，全部为 `ai_analyst.py` 内纯 pandas 实现。
+- **大模型**：复用 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`（`.env` 已配置，默认 DeepSeek `deepseek-chat`），与 `fundamental.py` 的事件抽取共用同一套配置，无需额外新增 key。
+- **无 key 时**：页面给出提示，不影响看板其它功能。
+- **命令行调用**（可选）：
+
+```python
+from ashare_quant.services.runtime import build_runtime
+from ashare_quant.ai_analyst import analyze_stock
+
+runtime = build_runtime()
+print(analyze_stock("600519", "贵州茅台", "最近一个月走势如何？", runtime))
+```
+
+> 免责：AI 输出仅供技术面参考，不构成投资建议。系统提示词已内置「结论给依据、明确风险提示、避免绝对化」约束。
 
 ## 回测规则
 

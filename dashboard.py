@@ -325,8 +325,8 @@ metrics[3].metric("持仓数量", f"{len(positions)} / {app.settings.risk['max_p
 risk_state = app.database.query_one("SELECT * FROM risk_state WHERE account_id='paper'") or {}
 metrics[4].metric("风控状态", "暂停" if risk_state.get("paused") or risk_state.get("daily_open_blocked") else "正常")
 
-lab_tab, overview, holdings, orders, signals_tab, risk_tab, backtest_tab, settings_tab = st.tabs(
-    ["因子实验室", "账户", "持仓", "委托成交", "交易信号", "风险监控", "回测", "配置"]
+lab_tab, overview, holdings, orders, signals_tab, risk_tab, backtest_tab, settings_tab, ai_tab = st.tabs(
+    ["因子实验室", "账户", "持仓", "委托成交", "交易信号", "风险监控", "回测", "配置", "AI 智能分析"]
 )
 with lab_tab:
     lab_bt, lab_scan, lab_factor, lab_strategy = st.tabs(
@@ -922,3 +922,25 @@ with settings_tab:
         {"项目": "企业微信", "值": "已配置" if app.settings.wecom_webhook else "未配置"},
         {"项目": "邮件", "值": "已配置" if app.settings.smtp_host else "未配置"},
     ]), width="stretch", hide_index=True)
+with ai_tab:
+    from ashare_quant.ai_analyst import analyze_stock, llm_available
+
+    st.subheader("AI 智能分析")
+    st.caption("自然语言问股：大模型结合实时行情与技术指标，生成个股分析（不构成投资建议）")
+    if not llm_available():
+        st.warning("未检测到 LLM_API_KEY，请在 .env 中配置后重启看板（默认 DeepSeek）")
+    ai_c1, ai_c2 = st.columns([1, 2])
+    with ai_c1:
+        ai_code = st.text_input("股票代码", value="600519", key="ai_code", help="6 位代码，如 600519 / 000001")
+        ai_name = st.text_input("股票名称（可选）", value="", key="ai_name", help="仅用于展示，可留空")
+    with ai_c2:
+        ai_question = st.text_input("你想问什么", value="最近一个月走势如何，能买吗？", key="ai_question")
+    if st.button("生成 AI 分析", type="primary", key="ai_analyze"):
+        code = ai_code.strip()
+        if not code:
+            st.error("请输入股票代码")
+        else:
+            with st.spinner("正在取行情、计算指标并调用大模型分析…"):
+                result = analyze_stock(code, ai_name.strip() or code, ai_question.strip(), app)
+            st.markdown("### 分析结果")
+            st.markdown(result)
