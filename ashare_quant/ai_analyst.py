@@ -28,9 +28,9 @@ from .data.providers import spot_prices
 
 LOG = logging.getLogger(__name__)
 
-# 中文列名（与 data/providers.py 的 normalize 结果一致）
-C_DATE, C_OPEN, C_HIGH, C_LOW, C_CLOSE = "日期", "开盘", "最高", "最低", "收盘"
-C_VOL, C_AMOUNT, C_PRE = "成交量", "成交额", "昨收"
+# 英文列名（DataService.load_bars 从 daily_bars 表读出的列名）
+C_DATE, C_OPEN, C_HIGH, C_LOW, C_CLOSE = "trade_date", "open", "high", "low", "close"
+C_VOL, C_AMOUNT, C_PRE = "volume", "amount", "pre_close"
 
 
 def _llm_config() -> tuple[str, str, str]:
@@ -76,7 +76,8 @@ def compute_indicators(frame: pd.DataFrame) -> dict[str, Any]:
     """
     if frame is None or frame.empty or C_CLOSE not in frame.columns:
         return {}
-    df = frame.sort_values(C_DATE).reset_index(drop=True)
+    # load_bars 返回的 frame 以 trade_date 为索引且保留同名列，先去掉索引歧义再排序
+    df = frame.reset_index(drop=True).sort_values(C_DATE).reset_index(drop=True)
     close = pd.to_numeric(df[C_CLOSE], errors="coerce")
     if len(close) < 5:
         return {}
