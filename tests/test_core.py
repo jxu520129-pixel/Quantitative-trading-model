@@ -354,3 +354,17 @@ def test_dashboard_refresh_default_is_30_seconds():
     raw = options.group(1)
     assert "DEFAULT_REFRESH_SECONDS" in raw or 30 in [int(v) for v in re.findall(r"\d+", raw)]
     assert 0 in [int(v) for v in re.findall(r"\d+", raw)], "0（暂停刷新）必须保留在可选项里"
+
+
+def test_tushare_rate_limiter_enforces_min_interval():
+    """限速器须真正拉大两次调用间隔，避免触发 Tushare 积分档的每分钟上限。"""
+    import time
+
+    from ashare_quant.data.providers import _RateLimiter
+
+    limiter = _RateLimiter(min_interval=0.05)  # 50ms
+    start = time.monotonic()
+    for _ in range(3):
+        limiter.wait()
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.10, f"3 次调用应至少间隔 2×50ms，实际 {elapsed:.3f}s"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -16,6 +17,33 @@ from ..utils import as_compact_date, normalize_date
 
 LOG = logging.getLogger(__name__)
 T = TypeVar("T")
+
+
+class _RateLimiter:
+    """线程安全的简单限速器：保证两次调用之间至少间隔 ``min_interval`` 秒。
+
+    用于 Tushare 低积分档 token 的每分钟调用上限（``daily`` 接口 300 次/分钟）。
+    若不限速，并发拉取会在几十秒内打满额度 → 触发「频率超限」→ 回退 AkShare；
+    而 AkShare 依赖 py_mini_racer（V8 引擎），在容器里初始化会 FATAL 崩溃（SIGTRAP），
+    直接杀掉进程——这是 2026-11-08 首次全量拉取反复「Exit 133」的根因。
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._last_call = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait_for = self._last_call + self.min_interval - now
+            if wait_for > 0:
+                time.sleep(wait_for)
+            self._last_call = time.monotonic()
+
+
+# Tushare 2200 积分档：daily/fund_daily 接口 300 次/分钟。留 ~20% 余量 → 240 次/分钟。
+_TUSHARE_DAILY_RATE_LIMITER = _RateLimiter(min_interval=60.0 / 240.0)
 
 
 def with_retry(attempts: int = 3, delay_seconds: float = 1.5) -> Callable[[Callable[..., T]], Callable[..., T]]:
@@ -270,6 +298,8 @@ class TushareProvider(MarketDataProvider):
     @with_retry()
     def daily_bars(self, code: str, start_date: str, end_date: str, security_type: str = "STOCK") -> pd.DataFrame:
         pro = self._pro()
+        # 限速：避免触发 Tushare 积分档的每分钟调用上限（否则会回退 AkShare 并崩溃）
+        _TUSHARE_DAILY_RATE_LIMITER.wait()
         exchange = ".SH" if code.startswith(("5", "6", "9")) else ".SZ"
         ts_code = f"{code}{exchange}"
         if security_type.upper() == "ETF":
