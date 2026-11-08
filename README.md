@@ -8,6 +8,11 @@
 
 > 只记改变**行为**或**数据口径**的改动，详细说明见下文对应章节。
 
+**2026-11-08**
+
+- **Tushare 拉取加限速器**。低积分档 token 的 `daily` 接口有每分钟调用上限（2200 积分为 300 次/分钟），原先并发拉取会瞬间超限，随后回退 AkShare，而 AkShare 依赖的 `py_mini_racer`（V8）在容器里 FATAL 崩溃（`Exit 133`）杀掉进程。现 `TushareProvider.daily_bars` 每次 API 调用前经线程安全 `_RateLimiter` 限速到 240 次/分钟（留 20% 余量），首次全量拉取约 25 分钟稳定完成。→ 见「获取真实行情」。
+- **部署迁到阿里云 ECS 免费试用（香港，2核2G）**，`deploy/cloud_setup.sh` 的 swap 2G→4G。香港地域的好处：私有 GitHub 仓库直连克隆无墙 + 每月 200GB 流量（内地仅 20GB）。→ 见「云服务器部署与更新」。
+
 **2026-10-24**
 
 - **新增「AI 智能分析」看板页与 `ashare_quant/ai_analyst.py` 模块**。在看板新增「AI 智能分析」标签页：输入股票代码 + 自然语言问题，系统取实时价与历史日线、计算技术指标（MA5/10/20/60、RSI、MACD、近 5/20/60 日涨跌幅、量比、年化波动率），组装成上下文后调用大模型生成技术面分析。大模型配置复用 `fundamental.py` 的 `LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`（默认 DeepSeek，无需新增配置）；未配置 `LLM_API_KEY` 时页面提示、不影响其它功能。指标计算为纯 pandas 实现，不引入新依赖。→ 见「AI 智能分析」。
@@ -119,7 +124,7 @@ python -m ashare_quant.cli intraday-trade                                  # 盘
 > `queue-orders` / `execute-orders` 是**遗留的手工排队路径**（生成委托 → 下一个交易日按开盘价成交），
 > 调度器已不再使用；保留是为了 CLI 手动调试与看板手动平仓。日常买卖走 `intraday-trade` 或常驻调度器。
 
-历史日线**主数据源为 Tushare**（付费代理更稳定，`.env` 配 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL`，留空走官方 `api.tushare.pro`），**备用源为 AkShare**（依赖免费新浪接口，高频拉取易被 SSL 重置/封禁，故仅作回退）；未配置 Tushare Token 时自动退回 AkShare。**实时行情（盘中买点扫描、盘前集合竞价）固定用 AkShare 拉取**——Tushare 不提供实时行情，系统每次仅 1 次请求拉全市场快照、每天约 6 次，低频不触发封禁。**注意数据单位口径**：Tushare 的 `amount` 单位是「千元」、`vol` 是「手」，AkShare 是「元」「股」；系统已在入库时统一为「元/股」口径（`TushareProvider` 内自动 ×1000/×100），因此 `scan.min_average_amount`（成交额下限）等阈值一律按「元」填写。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 2）并发拉取日线；数据源频繁报错/限流时可把该值调到 1（串行）。为避免限流导致「当日数据大面积缺失」，系统内置两道保障：① **整批重试**——单轮失败标的占比超过 `data.update_retry_failure_ratio`（默认 30%）时，自动降并发到 1 对失败标的补拉一轮；② **盘后完整性闸门**——盘后流程（`after_close`）在买点扫描与信号生成前检查「最新交易日日线覆盖率」，低于 `data.min_daily_coverage`（默认 80%）时跳过推送并改发「盘后流程推迟」告警，避免用过期收盘价误报。生产环境应先用少量代码测试：
+历史日线**主数据源为 Tushare**（付费代理更稳定，`.env` 配 `TUSHARE_TOKEN` + 可选 `TUSHARE_API_URL`，留空走官方 `api.tushare.pro`），**备用源为 AkShare**（依赖免费新浪接口，高频拉取易被 SSL 重置/封禁，故仅作回退）；未配置 Tushare Token 时自动退回 AkShare。**实时行情（盘中买点扫描、盘前集合竞价）固定用 AkShare 拉取**——Tushare 不提供实时行情，系统每次仅 1 次请求拉全市场快照、每天约 6 次，低频不触发封禁。**注意数据单位口径**：Tushare 的 `amount` 单位是「千元」、`vol` 是「手」，AkShare 是「元」「股」；系统已在入库时统一为「元/股」口径（`TushareProvider` 内自动 ×1000/×100），因此 `scan.min_average_amount`（成交额下限）等阈值一律按「元」填写。批量更新按标的隔离失败并重试，并以 `data.update_concurrency`（默认 2）并发拉取日线；数据源频繁报错/限流时可把该值调到 1（串行）。**Tushare 低积分档 token 有每分钟调用上限（2200 积分的 `daily` 为 300 次/分钟），`TushareProvider` 内置线程安全限速器把日线拉取压到 240 次/分钟**，避免触发「频率超限」后回退到会崩溃的 AkShare（其依赖 py_mini_racer/V8 在容器里 FATAL）。为避免限流导致「当日数据大面积缺失」，系统内置两道保障：① **整批重试**——单轮失败标的占比超过 `data.update_retry_failure_ratio`（默认 30%）时，自动降并发到 1 对失败标的补拉一轮；② **盘后完整性闸门**——盘后流程（`after_close`）在买点扫描与信号生成前检查「最新交易日日线覆盖率」，低于 `data.min_daily_coverage`（默认 80%）时跳过推送并改发「盘后流程推迟」告警，避免用过期收盘价误报。生产环境应先用少量代码测试：
 
 ```powershell
 python -m ashare_quant.cli update-data --codes 600000,600036,510300
@@ -629,7 +634,7 @@ Docker 同时启动看板和调度器，共享一个 SQLite WAL 数据卷。镜�
 
 ## 云服务器部署与更新
 
-云端采用「git 克隆 + Docker Compose」方式部署（生产运行于腾讯云轻量服务器 2核2G，后续可升级配置）。
+云端采用「git 克隆 + Docker Compose」方式部署。生产历史：腾讯云轻量 2核2G →（2026-11 起）阿里云 ECS 免费试用（香港、2核2G，300 元试用金 / 3 个月）。**2核2G 足以跑日线量化**；选香港地域的好处：私有 GitHub 仓库 `git clone` 直连无墙 + 每月 200GB 流量（内地地域只有 20GB）。
 
 **首次部署**（详见 `deploy/cloud_setup.sh` 与 `部署更新指南.md`）：
 
@@ -638,8 +643,12 @@ Docker 同时启动看板和调度器，共享一个 SQLite WAL 数据卷。镜�
 git clone https://github.com/<账号>/<仓库>.git ashare-quant
 cd ashare-quant
 cp .env.example .env && vi .env          # 设置 DASHBOARD_PASSWORD
-bash deploy/cloud_setup.sh               # 自动：装 Docker + 2G swap + 调重训采样 + 构建启动
+bash deploy/cloud_setup.sh               # 自动：装 Docker + 4G swap + 调重训采样 + 构建启动
 ```
+
+> **首次全量拉取历史库（`update-data`）的两个坑**（2026-11 实操踩过）：
+> ① **Tushare 低积分档有每分钟调用上限**（2200 积分 token 的 `daily` 接口 300 次/分钟）。`TushareProvider` 已内置**线程安全限速器**，把日线拉取压到 240 次/分钟（留 20% 余量），全程不触发「频率超限」——否则超限后回退 AkShare，而 AkShare 依赖的 `py_mini_racer`（V8）在容器里会 **FATAL 崩溃（SIGTRAP，`Exit 133`）**，把进程直接杀掉。全量 6000 只约 25 分钟拉完。
+> ② **2G 内存跑首次全量拉取偏紧**（内存峰值 + 碎片，曾导致整机假死）。缓解：拉取前 `docker compose stop dashboard` 腾内存、保留 4G swap 兜底。拉完 `docker compose start dashboard`。之后每日增量更新只有几十次调用，无此问题。
 
 **日常更新**（改功能 → 上线）：
 
