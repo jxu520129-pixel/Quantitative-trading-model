@@ -5,9 +5,9 @@
 # 幂等可重复执行；适合 Docker CE 应用镜像或已装 Docker 的 Ubuntu。
 set -euo pipefail
 
-echo "==> [1/6] 配置 2G swap（防止每日 16:10 模型重训 OOM）"
+echo "==> [1/6] 配置 4G swap（防止每日 16:10 模型重训 OOM）"
 if ! swapon --show 2>/dev/null | grep -q swapfile; then
-  sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+  sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
   sudo chmod 600 /swapfile
   sudo mkswap /swapfile
   sudo swapon /swapfile
