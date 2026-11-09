@@ -335,6 +335,12 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None, bars: int =
         chart = chart.configure_axisX(format="%m月%d日")
     except Exception:
         pass
+    # 强制画布贴合容器（autosize=fit），避免 vega 默认 pad 把中文轴标签
+    # 计入画布宽度、把画布撑得比页面宽导致横向滚动
+    try:
+        chart = chart.properties(autosize="fit")
+    except Exception:
+        pass
     return chart
 
 
