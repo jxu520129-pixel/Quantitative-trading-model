@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("score-main-rally", help="主升浪评分：事件+宏观+产业链+盈利+技术加权")
     sub.add_parser("find-buys", help="扫描策略买入候选并通过邮件/企业微信发送")
     sub.add_parser("retrain-model", help="重训主升概率模型（收盘后管线，可手动触发）")
+    eff = sub.add_parser("event-effectiveness", help="事件有效性回测：统计事件类型→匹配个股未来N日表现")
+    eff.add_argument("--days", type=int, default=20, help="未来交易日数（默认 20）")
+    eff.add_argument("--min-events", type=int, default=3, help="事件类型最少样本数（默认 3）")
     hot = sub.add_parser("hot-backtest", help="短线人气·热度共振策略日线近似回测（落库供看板展示）")
     hot.add_argument("--start", default="2025-01-01", help="回测起始日")
     hot.add_argument("--end", default=None, help="回测结束日，默认今天")
@@ -205,6 +208,9 @@ def main() -> None:
     elif args.command == "retrain-model":
         from . import ml_model
         print_json(ml_model.retrain(runtime.database, runtime.data, runtime.settings))
+    elif args.command == "event-effectiveness":
+        from .main_rally import event_effectiveness_report
+        print_json(event_effectiveness_report(runtime.database, days=args.days, min_events=args.min_events))
     elif args.command == "hot-backtest":
         metrics = run_hot_backtest(
             runtime.database, runtime.data, start_date=args.start, end_date=args.end,

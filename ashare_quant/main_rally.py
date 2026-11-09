@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html as _html
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -16,6 +17,7 @@ import pandas as pd
 from .database import Database
 from .event_similarity import format_similarity_section_html, similar_event_review
 from .industry_chain import (
+    ALIAS_TO_CODE,
     INDUSTRY_CHAIN,
     TUSHARE_TO_CHAIN,
     affected_industries,
@@ -272,7 +274,7 @@ def top_events_today(database: Database, limit: int = 15) -> list[dict[str, Any]
     「当日」；当日无事件时回退到最近入库的事件，保证盘前报告不空。
     """
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-    fields = "title, summary, event_time, event_type, magnitude, causal_direction, affected_industries, persistence"
+    fields = "title, summary, event_time, event_type, magnitude, causal_direction, affected_industries, persistence, entities"
     events = database.query_all(
         f"SELECT {fields} FROM events WHERE event_time LIKE ? ORDER BY magnitude DESC, event_time DESC LIMIT ?",
         (f"{today}%", limit),
@@ -338,6 +340,120 @@ def match_event_candidates(
             matched.append(c)
     matched.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
     return matched[:limit]
+
+
+def rank_candidates_multifactor(database: Database, matched: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """S3：候选多因子排序——相关度(source) + 成交额(amount) + 技术形态(当日涨幅)。
+
+    相关度权重：公司名直配(name) > 候选池行业匹配 > 后备池代表股(pool)。
+    成交额取对数缩放，涨幅反映市场关注度。综合分写入 ``rank_score`` 后降序，
+    替代单一 ``score``（后备池/直配的 score 都是占位 50，无法区分优劣）。
+    """
+    if len(matched) <= 1:
+        return matched
+    codes = [m["code"] for m in matched]
+    placeholders = ",".join("?" * len(codes))
+    try:
+        rows = database.query_all(
+            f"""SELECT code, close, pre_close, amount FROM daily_bars
+                WHERE trade_date=(SELECT MAX(trade_date) FROM daily_bars) AND code IN ({placeholders})""",
+            codes,
+        )
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("多因子排序查询失败：%s", error)
+        rows = []
+    info = {r["code"]: r for r in rows}
+    for m in matched:
+        src = m.get("source") or ""
+        rel = 100.0 if src == "name" else (40.0 if src == "pool" else 70.0)
+        r = info.get(m["code"])
+        amount = float(r["amount"] or 0) if r else 0.0
+        close = float(r["close"] or 0) if r else 0.0
+        pre = float(r["pre_close"] or 0) if r else 0.0
+        pct = (close / pre - 1) * 100 if pre else 0.0
+        amount_score = min(math.log10(amount + 1) * 1.0, 12.0) if amount > 0 else 0.0
+        tech = min(max(pct, -10.0), 10.0)
+        m["rank_score"] = round(rel + amount_score + tech, 2)
+    matched.sort(key=lambda x: float(x.get("rank_score", 0) or 0), reverse=True)
+    return matched
+
+
+def _future_return(database: Database, code: str, event_date: str, days: int) -> float | None:
+    """查 ``code`` 在 ``event_date`` 之后第 ``days`` 个交易日的涨幅（相对事件日收盘）。"""
+    base = database.query_one(
+        "SELECT close FROM daily_bars WHERE code=? AND trade_date<=? ORDER BY trade_date DESC LIMIT 1",
+        (code, event_date[:10]),
+    )
+    future = database.query_all(
+        "SELECT close FROM daily_bars WHERE code=? AND trade_date>? ORDER BY trade_date ASC LIMIT ?",
+        (code, event_date[:10], days),
+    )
+    if not base or not future or not base["close"] or len(future) < days:
+        return None
+    future_close = float(future[-1]["close"] or 0)
+    if future_close <= 0:
+        return None
+    return future_close / float(base["close"]) - 1
+
+
+def event_effectiveness_report(database: Database, days: int = 20, min_events: int = 3) -> list[dict[str, Any]]:
+    """S2：事件有效性回测——统计「事件类型 → 匹配个股未来 N 日平均收益/胜率」。
+
+    对历史事件做简化匹配（别名直配 + 直接行业代表股），计算事件后 N 日涨幅，
+    按 ``event_type`` 聚合出平均收益与胜率，用于评估「哪类事件历史上最有效」。
+    返回按平均收益降序的报告列表。
+    """
+    events = database.query_all(
+        "SELECT title, summary, event_time, event_type, entities FROM events "
+        "WHERE event_time != '' ORDER BY event_time DESC LIMIT 1000"
+    )
+    stats: dict[str, dict[str, Any]] = {}
+    for ev in events:
+        text = (ev.get("title") or "") + " " + (ev.get("entities") or "")
+        codes: list[str] = []
+        for alias, code in ALIAS_TO_CODE.items():
+            if alias in text and code not in codes:
+                codes.append(code)
+        industries = direct_industries(text) or direct_industries(str(ev.get("event_type") or ""))
+        for ind in industries[:2]:
+            for tname in [t for t, c in TUSHARE_TO_CHAIN.items() if c == ind][:1]:
+                rows = database.query_all(
+                    """SELECT sb.code FROM stock_basic sb
+                       JOIN stock_industry si ON sb.code = si.code
+                       JOIN daily_bars db ON db.code = sb.code
+                          AND db.trade_date = (SELECT MAX(trade_date) FROM daily_bars)
+                       WHERE si.industry = ? AND sb.is_st=0 AND sb.is_delisted=0
+                       ORDER BY db.amount DESC LIMIT 3""",
+                    (tname,),
+                )
+                for r in rows:
+                    if r["code"] not in codes:
+                        codes.append(r["code"])
+        if not codes:
+            continue
+        returns: list[float] = []
+        for code in codes[:3]:
+            ret = _future_return(database, code, ev.get("event_time") or "", days)
+            if ret is not None:
+                returns.append(ret)
+        if not returns:
+            continue
+        et = str(ev.get("event_type") or "其他")
+        st = stats.setdefault(et, {"count": 0, "returns": []})
+        st["count"] += 1
+        st["returns"].extend(returns)
+    report: list[dict[str, Any]] = []
+    for et, st in stats.items():
+        if st["count"] < min_events:
+            continue
+        avg = sum(st["returns"]) / len(st["returns"])
+        win = sum(1 for r in st["returns"] if r > 0) / len(st["returns"])
+        report.append({
+            "event_type": et, "count": st["count"],
+            "avg_return": round(avg * 100, 2), "win_rate": round(win * 100, 1),
+        })
+    report.sort(key=lambda x: x["avg_return"], reverse=True)
+    return report
 
 
 def _event_stars(magnitude: Any) -> str:
@@ -466,11 +582,32 @@ def format_daily_events_html(
         return pooled
 
     def _match_by_name(ev: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-        """事件文本里直接出现 A 股公司简称时，优先精确命中该股（最可靠的相关性信号）。"""
+        """事件文本里直接出现公司指代时，优先精确命中该股（最可靠的相关性信号）。
+
+        优先级：① 花名/别名（「宁王」「酱香科技」这类简称匹配不到的市场俗称）→
+        ② 股票简称子串匹配。二者去重，别名命中优先。
+        LLM 抽取的公司实体（``entities`` 字段）一并拼入匹配文本，弥补纯子串的歧义与遗漏。
+        """
         text = _event_text(ev)
-        if not text:
+        entities = (ev.get("entities") or "").strip()
+        if entities:
+            text = f"{text} {entities}"
+        if not text.strip():
             return []
-        codes = [code for code, name in _stock_names() if name in text][:limit]
+        codes: list[str] = []
+        # ① 花名/别名精确匹配（S1：解决简称匹配不到的花名指代）
+        for alias, code in ALIAS_TO_CODE.items():
+            if alias in text and code not in codes:
+                codes.append(code)
+                if len(codes) >= limit:
+                    break
+        # ② 股票简称子串匹配（补齐名额，排除已由别名命中的）
+        if len(codes) < limit:
+            for code, name in _stock_names():
+                if name in text and code not in codes:
+                    codes.append(code)
+                    if len(codes) >= limit:
+                        break
         if not codes:
             return []
         placeholders = ",".join("?" * len(codes))
@@ -562,6 +699,7 @@ def format_daily_events_html(
             return
         stocks = _event_stocks(ev, limit=3)
         if stocks:
+            stocks = rank_candidates_multifactor(database, stocks)
             from_pool = all(s.get("source") == "pool" for s in stocks)
 
             def _one_stock(s: dict[str, Any]) -> str:

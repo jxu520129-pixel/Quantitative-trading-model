@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS events (
     source TEXT NOT NULL DEFAULT '', source_level TEXT NOT NULL DEFAULT 'B',
     magnitude INTEGER NOT NULL DEFAULT 1, causal_direction TEXT NOT NULL DEFAULT '中性',
     affected_industries TEXT NOT NULL DEFAULT '', persistence TEXT NOT NULL DEFAULT '短期',
-    created_at TEXT NOT NULL
+    entities TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_type_time ON events(event_type, event_time);
 CREATE TABLE IF NOT EXISTS macro_indicators (
@@ -188,6 +188,8 @@ class Database:
                 conn.execute("ALTER TABLE events ADD COLUMN affected_industries TEXT NOT NULL DEFAULT ''")
             if "persistence" not in event_cols:
                 conn.execute("ALTER TABLE events ADD COLUMN persistence TEXT NOT NULL DEFAULT '短期'")
+            if "entities" not in event_cols:
+                conn.execute("ALTER TABLE events ADD COLUMN entities TEXT NOT NULL DEFAULT ''")
             # 迁移：为旧库补充 positions 的策略归属与移动止损峰值列
             position_cols = {row["name"] for row in conn.execute("PRAGMA table_info(positions)")}
             if "strategy" not in position_cols:

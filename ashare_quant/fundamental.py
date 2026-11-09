@@ -161,6 +161,60 @@ def llm_extract_events(events: list[dict[str, str]], batch_size: int = 30) -> di
     return result
 
 
+def llm_extract_entities(events: list[dict[str, str]], batch_size: int = 30) -> dict[int, list[str]]:
+    """用 LLM 从新闻里抽取 A 股公司实体（公司名/市场俗称），返回 ``{index: [实体, ...]}``。
+
+    抽取的实体供「查找股票」的公司名精确匹配使用：配合 ``ALIAS_TO_CODE`` + 股票简称，
+    把新闻里提到的公司精确锁定到股票代码，弥补纯子串匹配的歧义（如「长城」既指汽车又指地名）
+    与遗漏（新闻用全称、别名而非股票简称）。无 key 或失败返回空。
+    """
+    api_key = os.getenv("LLM_API_KEY", "")
+    base_url = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+    model = os.getenv("LLM_MODEL", "deepseek-chat")
+    if not api_key or not events:
+        return {}
+
+    result: dict[int, list[str]] = {}
+    for batch_start in range(0, len(events), batch_size):
+        batch = events[batch_start:batch_start + batch_size]
+        lines = [f"{i}. {ev['title']} {ev['summary'][:60]}" for i, ev in enumerate(batch, start=batch_start)]
+        prompt = (
+            "你是A股信息抽取助手。对下面每条新闻，抽取其中明确提到的**中国A股上市公司名称或市场俗称**"
+            "（如：宁德时代、贵州茅台、宁王、比亚迪、隆基绿能）。只抽取公司实体，"
+            "不要抽取产品名、行业、地名、宏观政策词；没有公司实体则返回空数组。\n"
+            "只返回JSON，格式：{\"results\":[{\"index\":0,\"entities\":[\"宁德时代\",\"比亚迪\"]},...]}\n\n"
+            + "\n".join(lines)
+        )
+        for attempt in range(1, 4):
+            try:
+                resp = requests.post(
+                    f"{base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                          "response_format": {"type": "json_object"}, "temperature": 0},
+                    timeout=90,
+                )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+                data = json.loads(_strip_json(content))
+                for item in data.get("results", []):
+                    try:
+                        idx = int(item.get("index", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if idx >= 0:
+                        entities = [str(e).strip() for e in (item.get("entities") or []) if str(e).strip()]
+                        if entities:
+                            result[idx] = entities
+                break
+            except Exception as error:  # noqa: BLE001
+                if attempt == 3:
+                    LOG.warning("LLM 实体抽取失败（已重试）：%s", error)
+                else:
+                    time.sleep(1.5 * attempt)
+    return result
+
+
 def _num(value: Any) -> float:
     try:
         return float(value)
@@ -168,27 +222,86 @@ def _num(value: Any) -> float:
         return 0.0
 
 
+def _normalize_title(title: str) -> str:
+    """N3：标题归一化——仅保留中文/字母/数字，去掉标点与空白，用于跨来源去重。"""
+    import re
+
+    return re.sub(r"[^\w\u4e00-\u9fff]", "", title or "")
+
+
+def _dedupe_events(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    """N3：跨来源去重——归一化标题完全相同，或相似度 ≥0.85，视为同一事件。"""
+    import difflib
+
+    result: list[dict[str, str]] = []
+    seen_norm: list[str] = []
+    for item in items:
+        norm = _normalize_title(item["title"])
+        if not norm:
+            continue
+        dup = False
+        for prev in seen_norm:
+            if norm == prev or (
+                len(norm) >= 10 and len(prev) >= 10
+                and difflib.SequenceMatcher(None, norm, prev).ratio() >= 0.85
+            ):
+                dup = True
+                break
+        if dup:
+            continue
+        seen_norm.append(norm)
+        result.append(item)
+    return result
+
+
 def fetch_global_events(database: Database, limit: int = 200) -> int:
-    """采集全球财经快讯，关键词分类后写入事件库。返回新增条数。"""
+    """采集多源财经快讯（东方财富 + 财联社电报），LLM 分类 + 实体抽取后写入事件库。返回新增条数。"""
     import akshare as ak
 
-    try:
-        frame = ak.stock_info_global_em()
-    except Exception as error:
-        LOG.warning("全球财经快讯获取失败：%s", error)
-        return 0
     now = utc_now_text()
     items: list[dict[str, str]] = []
-    for item in frame.head(limit).to_dict("records"):
-        title = str(item.get("标题", "")).strip()
-        if not title:
-            continue
-        items.append({
-            "title": title,
-            "summary": str(item.get("摘要", "")).strip(),
-            "event_time": str(item.get("发布时间", "")).strip(),
-        })
+    # 源 1：东方财富全球财经快讯
+    try:
+        frame = ak.stock_info_global_em()
+        for item in frame.head(limit).to_dict("records"):
+            title = str(item.get("标题", "")).strip()
+            if not title or title == "nan":
+                continue
+            items.append({
+                "title": title,
+                "summary": str(item.get("摘要", "")).strip(),
+                "event_time": str(item.get("发布时间", "")).strip(),
+                "source": "东方财富快讯",
+            })
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("东方财富快讯获取失败：%s", error)
+    # 源 2：财联社电报（标题列可能为空，回退用内容前 40 字）
+    try:
+        frame = ak.stock_info_global_cls(symbol="全部")
+        for item in frame.head(limit).to_dict("records"):
+            title = str(item.get("标题", "")).strip()
+            content = str(item.get("内容", "")).strip()
+            if (not title or title == "nan") and content and content != "nan":
+                title = content[:40]
+            if not title or title == "nan":
+                continue
+            pub_date = str(item.get("发布日期", "")).strip()[:10]
+            pub_time = str(item.get("发布时间", "")).strip()
+            event_time = f"{pub_date} {pub_time}".strip()
+            items.append({
+                "title": title,
+                "summary": content[:200] if content != "nan" else "",
+                "event_time": event_time,
+                "source": "财联社电报",
+            })
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("财联社电报获取失败：%s", error)
+
+    if not items:
+        return 0
+    items = _dedupe_events(items)
     llm_results = llm_extract_events(items)
+    entity_results = llm_extract_entities(items)
     rows = []
     for i, item in enumerate(items):
         title = item["title"]
@@ -214,11 +327,12 @@ def fetch_global_events(database: Database, limit: int = 200) -> int:
             magnitude = event_magnitude(text)
             direction = event_direction(text)
             persistence = "中期" if magnitude >= 3 else "短期"
-        rows.append((event_id, title, summary[:200], event_time, event_type, "全球财经快讯", "B", magnitude, direction, industries, persistence, now))
+        entities = ",".join(entity_results.get(i, []))
+        rows.append((event_id, title, summary[:200], event_time, event_type, item["source"], "B", magnitude, direction, industries, persistence, entities, now))
     if rows:
         database.executemany(
-            """INSERT OR IGNORE INTO events(id,title,summary,event_time,event_type,source,source_level,magnitude,causal_direction,affected_industries,persistence,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT OR IGNORE INTO events(id,title,summary,event_time,event_type,source,source_level,magnitude,causal_direction,affected_industries,persistence,entities,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             rows,
         )
     return len(rows)
