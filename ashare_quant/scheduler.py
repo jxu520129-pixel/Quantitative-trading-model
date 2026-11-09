@@ -68,13 +68,22 @@ def after_close(runtime: Runtime) -> None:
         runtime.data.refresh_universe()
     update = runtime.data.update_daily()
     # 数据完整性闸门：最新交易日覆盖率不足则推迟买点扫描与离场，避免用过期收盘价误判
-    if not runtime.data.daily_data_complete():
+    report = runtime.data.daily_coverage_report()
+    if not report["complete"]:
+        if report["coverage"] is not None:
+            detail = (
+                f"最新交易日 {report['latest_date']} 仅 {report['latest_count']} 只，"
+                f"前一交易日 {report['previous_count']} 只，覆盖率 {report['coverage']:.2%}"
+                f"（阈值 {report['threshold']:.0%}）"
+            )
+        else:
+            detail = report["reason"]
         runtime.notifications.send(
             "盘后流程推迟",
-            f"今日日线数据拉取不完整（更新结果={update}），买点扫描与收盘价离场已推迟，避免用过期价格推送。",
+            f"今日日线数据不完整：{detail}。买点扫描与收盘价离场已推迟，避免用过期价格推送。",
             "WARNING",
         )
-        LOG.warning("今日日线数据不完整（%s），推迟盘后买点扫描与离场", update)
+        LOG.warning("今日日线数据不完整（%s），推迟盘后买点扫描与离场", detail)
         return
     has_candidates, buy_report, buy_html = build_buy_report(runtime.data, runtime.database, exclude_prefix="主升浪")
     if has_candidates:

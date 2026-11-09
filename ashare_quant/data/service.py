@@ -156,22 +156,48 @@ class DataService:
             result["failed"] = retry_result["failed"]
         return result
 
-    def daily_data_complete(self, threshold: float | None = None) -> bool:
-        """最新交易日日线覆盖率是否达标（盘后流程闸门，避免用过期收盘价推送）。
+    def daily_coverage_report(self, threshold: float | None = None) -> dict:
+        """校验最新交易日日线覆盖率，返回结构化报告（日期、条数、覆盖率、是否达标）。
 
         以「最新交易日条数 / 前一交易日条数」近似覆盖率；低于 ``data.min_daily_coverage``
-        （默认 0.80）判定为当日数据拉取不完整。
+        （默认 0.80）判定为当日数据拉取不完整。边界（空库 / 仅一个交易日 / 前一交易日
+        条数为 0）无法对比时**视作完整、不误报**，理由写入 ``reason``。
+        供盘后流程告警与 ``scripts/check_daily_coverage.py`` 复用，比布尔值多出具体数字。
         """
-        threshold = threshold if threshold is not None else float(self.settings.data.get("min_daily_coverage", 0.80) or 0.80)
+        threshold = threshold if threshold is not None else float(
+            self.settings.data.get("min_daily_coverage", 0.80) or 0.80
+        )
         rows = self.database.query_all(
             "SELECT trade_date, COUNT(*) AS cnt FROM daily_bars GROUP BY trade_date ORDER BY trade_date DESC LIMIT 2"
         )
+        base = {
+            "complete": True, "latest_date": None, "latest_count": 0,
+            "previous_date": None, "previous_count": 0, "coverage": None,
+            "threshold": threshold, "reason": None,
+        }
+        if not rows:
+            base["reason"] = "库中无日线数据，无法对比覆盖率"
+            return base
+        base["latest_date"] = str(rows[0]["trade_date"])
+        base["latest_count"] = int(rows[0]["cnt"])
         if len(rows) < 2:
-            return True  # 只有一天数据，无从对比，视作完整
-        latest, previous = int(rows[0]["cnt"]), int(rows[1]["cnt"])
-        if previous <= 0:
-            return True
-        return (latest / previous) >= threshold
+            base["reason"] = "仅一个交易日有数据，无法对比覆盖率"
+            return base
+        base["previous_date"] = str(rows[1]["trade_date"])
+        base["previous_count"] = int(rows[1]["cnt"])
+        if base["previous_count"] <= 0:
+            base["reason"] = "前一交易日条数为 0，无法对比覆盖率"
+            return base
+        coverage = base["latest_count"] / base["previous_count"]
+        base["coverage"] = coverage
+        base["complete"] = coverage >= threshold
+        if not base["complete"]:
+            base["reason"] = f"覆盖率 {coverage:.2%} 低于阈值 {threshold:.0%}"
+        return base
+
+    def daily_data_complete(self, threshold: float | None = None) -> bool:
+        """最新交易日日线覆盖率是否达标（盘后流程闸门，避免用过期收盘价推送）。"""
+        return bool(self.daily_coverage_report(threshold)["complete"])
 
     def store_bars(self, code: str, frame: pd.DataFrame) -> int:
         """清洗并落库单只标的日线（按交易日去重、UPSERT），返回写入条数。"""
