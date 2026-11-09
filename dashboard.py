@@ -316,17 +316,17 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None, bars: int =
             x=alt.X("trade_date:T", title=None), y=alt.Y("close:Q", scale=p_scale, axis=None),
             text="label:N", color=marker_color,
         )
-    price = price.properties(height=240, width="container")
+    price = price.properties(height=240)
 
     vol = base.mark_bar(color="#3a4a5a", opacity=0.7).encode(
         y=alt.Y("volume:Q", title="成交量")
-    ).properties(height=80, width="container")
+    ).properties(height=80)
     macd_bar = base.mark_bar().encode(
         y=alt.Y("macd:Q", title="MACD"),
         color=alt.condition("datum.macd >= 0", alt.value("#ff6b6b"), alt.value("#36C98F")),
     )
     macd_line = base.mark_line(color="#58A6FF").encode(y=alt.Y("dif:Q")) + base.mark_line(color="#f0b90b").encode(y=alt.Y("dea:Q"))
-    macd = (macd_bar + macd_line).properties(height=100, width="container")
+    macd = (macd_bar + macd_line).properties(height=100)
     # 只共享 x（时间对齐）；y 必须各段独立——若 y 也 shared，价格(≈8元)会被
     # 成交量(≈1亿)的 domain 压成一条线
     chart = alt.vconcat(price, vol, macd).resolve_scale(x="shared")
