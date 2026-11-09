@@ -20,7 +20,7 @@ LOG = logging.getLogger(__name__)
 # 盘中即时交易时点（09:25 集合竞价结束后开始，15:00 收盘前结束）。
 # 15:05–15:30 是盘后固定价格交易时段，只能按当日收盘价成交、拿不到盘中实时价，
 # 因此不作为买入时点（见 ``after_close`` 的收盘价离场）。
-DEFAULT_INTRADAY_TIMES = ("09:37", "10:00", "10:30", "14:30", "14:50")
+DEFAULT_INTRADAY_TIMES = ("09:35", "10:00", "10:30", "14:30", "14:50")
 
 
 def _skip_if_holiday(runtime: Runtime, label: str) -> bool:
@@ -201,7 +201,7 @@ def morning_execution(runtime: Runtime) -> None:
 
     买入已改为盘中即时成交，这里**不再有新委托可执行**；保留该任务是因为 T+1 的
     「昨日买入今日可卖」与风控「日内停止状态」重置都发生在 ``roll_to_new_day``，
-    必须在当日第一次盘中交易（09:37）之前完成。
+    必须在当日第一次盘中交易（09:35）之前完成。
     """
     if _skip_if_holiday(runtime, "开盘前结算"):
         return

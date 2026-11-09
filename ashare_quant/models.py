@@ -144,7 +144,7 @@ def market_open_fill_time(trade_date: str, order_id: str) -> str:
 def intraday_fill_time(trade_date: str, moment: datetime | None = None) -> str:
     """为**盘中即时成交**生成真实成交时刻 ``YYYY-MM-DD HH:MM:SS``（北京时间）。
 
-    盘中扫描改在 09:37/10:00/10:30/14:30/14:50 以实时价成交，成交时间必须反映当时的
+    盘中扫描改在 09:35/10:00/10:30/14:30/14:50 以实时价成交，成交时间必须反映当时的
     时点，不能再写死 09:30（那会让人误以为还是次日开盘撮合）。
     """
     moment = moment or datetime.now(timezone(timedelta(hours=8)))
