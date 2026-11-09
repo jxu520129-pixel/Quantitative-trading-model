@@ -306,7 +306,9 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
     )
     macd_line = base.mark_line(color="#58A6FF").encode(y=alt.Y("dif:Q")) + base.mark_line(color="#f0b90b").encode(y=alt.Y("dea:Q"))
     macd = (macd_bar + macd_line).properties(height=100)
-    return alt.vconcat(price, vol, macd).resolve_scale(x="shared", y="shared")
+    # 只共享 x（时间对齐）；y 必须各段独立——若 y 也 shared，价格(≈8元)会被
+    # 成交量(≈1亿)的 domain 压成一条线
+    return alt.vconcat(price, vol, macd).resolve_scale(x="shared")
 
 
 def _ai_chart_legend(hints: dict, with_color_hint: bool = True) -> str:
