@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import os
@@ -33,6 +34,12 @@ LOG = logging.getLogger(__name__)
 # 英文列名（DataService.load_bars 从 daily_bars 表读出的列名）
 C_DATE, C_OPEN, C_HIGH, C_LOW, C_CLOSE = "trade_date", "open", "high", "low", "close"
 C_VOL, C_AMOUNT, C_PRE = "volume", "amount", "pre_close"
+
+# 画线标注的类型白名单（levels=水平价位线，markers=关键日期标记）
+LEVEL_TYPES = {"support", "resistance", "stop", "target", "other"}
+MARKER_TYPES = {"buy", "sell", "risk", "other"}
+# 文字分析模式末尾的画线标注行标记
+_ANNOTATION_MARK = "ANNOTATION_JSON="
 
 
 def _llm_config() -> tuple[str, str, str]:
@@ -166,6 +173,113 @@ def _fmt_indicators(ind: dict[str, Any]) -> str:
         f"- 量能比（近5日/近60日均量）{ind.get('vol_ratio')}，年化波动率 {ind.get('ann_vol')}%",
     ]
     return "\n".join(lines)
+
+
+def _load_recent_bars(runtime: Any, code: str, lookback: int = 130) -> pd.DataFrame:
+    """加载个股最近 ``lookback`` 根日线，失败返回空 DataFrame。"""
+    try:
+        frame = runtime.data.load_bars(code, end_date=None)
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("加载行情失败 %s：%s", code, error)
+        return pd.DataFrame()
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return frame.tail(lookback)
+
+
+def _align_trade_date(dates: list[str], target: str) -> str | None:
+    """把大模型给出的日期对齐到数据中真实存在的最近交易日（不晚于 target）。"""
+    if not dates:
+        return None
+    sorted_dates = sorted(dates)
+    idx = bisect.bisect_right(sorted_dates, (target or "")[:10]) - 1
+    if idx < 0:
+        idx = 0
+    return sorted_dates[idx]
+
+
+def _sanitize_chart_hints(levels: Any, markers: Any, frame: pd.DataFrame) -> dict[str, list[dict]]:
+    """校验并规整大模型输出的画线标注，返回 {"levels": [...], "markers": [...]}。
+
+    规则：
+    - 水平线价格必须落在 K 线最高/最低价 ±5% 范围内（避免极端值压缩坐标轴）；
+    - 标记日期必须对齐到数据中真实存在的交易日，并附带当日收盘价；
+    - 类型走白名单（levels: support/resistance/stop/target/other；markers: buy/sell/risk/other）；
+    - 去重（同价格 / 同日期只留一条），label 截断 8 字，各最多 3 条。
+    """
+    empty = {"levels": [], "markers": []}
+    if frame is None or frame.empty or C_DATE not in frame.columns:
+        return empty
+
+    dates = [str(d)[:10] for d in frame[C_DATE]]
+    close_by_date = {
+        str(d)[:10]: float(c)
+        for d, c in zip(frame[C_DATE], pd.to_numeric(frame[C_CLOSE], errors="coerce"))
+    }
+    low = float(pd.to_numeric(frame[C_LOW], errors="coerce").min())
+    high = float(pd.to_numeric(frame[C_HIGH], errors="coerce").max())
+    lo, hi = low * 0.95, high * 1.05
+
+    levels_out: list[dict] = []
+    seen_prices: set[float] = set()
+    for item in (levels or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        price = round(_num(item.get("price")), 2)
+        label = str(item.get("label") or "").strip()[:8]
+        if price <= 0 or not (lo <= price <= hi) or not label:
+            continue
+        if price in seen_prices:
+            continue
+        kind = str(item.get("type") or "other").strip().lower()
+        if kind not in LEVEL_TYPES:
+            kind = "other"
+        seen_prices.add(price)
+        levels_out.append({"price": price, "label": label, "type": kind})
+        if len(levels_out) >= 3:
+            break
+
+    markers_out: list[dict] = []
+    seen_dates: set[str] = set()
+    for item in (markers or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        raw_date = str(item.get("date") or "").strip()[:10]
+        label = str(item.get("label") or "").strip()[:8]
+        if not raw_date or not label:
+            continue
+        aligned = _align_trade_date(dates, raw_date)
+        if not aligned or aligned in seen_dates:
+            continue
+        kind = str(item.get("type") or "other").strip().lower()
+        if kind not in MARKER_TYPES:
+            kind = "other"
+        close_val = close_by_date.get(aligned)
+        if close_val is None or pd.isna(close_val):
+            continue
+        seen_dates.add(aligned)
+        markers_out.append({"date": aligned, "price": round(close_val, 2), "label": label, "type": kind})
+        if len(markers_out) >= 3:
+            break
+
+    return {"levels": levels_out, "markers": markers_out}
+
+
+def _split_annotation_json(text: str | None) -> tuple[str, dict | None]:
+    """从分析文本中剥离尾部的 ``ANNOTATION_JSON=...`` 行并解析，返回 (正文, 标注)。"""
+    if not text or _ANNOTATION_MARK not in text:
+        return text or "", None
+    idx = text.rfind(_ANNOTATION_MARK)
+    head = text[:idx].strip()
+    raw = text[idx + len(_ANNOTATION_MARK):].strip()
+    end = raw.rfind("}")
+    if end == -1:
+        return text, None
+    try:
+        data = json.loads(raw[: end + 1])
+        return head, data
+    except Exception:  # noqa: BLE001
+        return text, None
 
 
 def build_market_context(code: str, name: str, runtime: Any, lookback: int = 130) -> str:
@@ -353,7 +467,12 @@ SYSTEM_PROMPT = (
 STRUCTURED_SYSTEM_PROMPT = (
     "你是一名专业的 A 股量化分析助手。请基于给定的多维数据（行情/技术指标/行业/事件/财务/策略信号）"
     "给出结构化分析。只返回 JSON 对象，字段为：score（0-100 综合评分）、trend（偏多/中性/偏空）、"
-    "risk_level（低/中/高）、key_points（字符串数组，3-5 条要点）、conclusion（一段 150 字以内的结论）。"
+    "risk_level（低/中/高）、key_points（字符串数组，3-5 条要点）、conclusion（一段 150 字以内的结论）、"
+    "levels（0-3 个关键价位水平线，数组元素为 {\"price\": 数值, \"label\": \"不超过8字的说明\", "
+    "\"type\": \"support|resistance|stop|target|other\" 之一}，price 必须落在数据给出的近 60 日高低点范围内）、"
+    "markers（0-3 个关键交易日标注，数组元素为 {\"date\": \"YYYY-MM-DD 格式的交易日\", "
+    "\"label\": \"不超过8字的说明\", \"type\": \"buy|sell|risk|other\" 之一}，date 必须是数据中出现过的交易日）。"
+    "无法确定时 levels/markers 输出空数组，不要编造数据中没有的价位或日期。"
     "必须基于给定数据、克制客观、明确风险提示、不构成投资建议。"
 )
 
@@ -391,8 +510,43 @@ def analyze_stock(code: str, name: str, question: str, runtime: Any) -> str:
     return result
 
 
+def analyze_stock_with_hints(code: str, name: str, question: str, runtime: Any) -> tuple[str, dict | None]:
+    """文字分析 + 画线标注：正文末尾要求大模型附 ``ANNOTATION_JSON`` 行，返回 (正文, 标注)。
+
+    ``标注`` 为 {"levels": [...], "markers": [...]}，已对齐真实交易日、价格范围已校验；
+    无有效标注时返回 None。可用于看板在行情图上叠加画线说明。
+    """
+    if not llm_available():
+        return "未配置 LLM_API_KEY，请在 .env 中配置后重试（默认 DeepSeek）。", None
+    context = build_rich_context(runtime, code, name)
+    prompt = (
+        f"以下是某只股票的多维数据：\n{context}\n\n"
+        f"请根据以上数据回答用户问题：{question or '请给出这只股票的综合分析'}\n\n"
+        "回答正文结束后，另起一行单独输出一行画线标注（无法确定时输出空数组）：\n"
+        'ANNOTATION_JSON={"levels":[{"price": 数值, "label": "不超过8字的说明", '
+        '"type": "support|resistance|stop|target|other"}], '
+        '"markers":[{"date": "YYYY-MM-DD 格式的交易日", "label": "不超过8字的说明", '
+        '"type": "buy|sell|risk|other"}]}\n'
+        "价位必须落在数据给出的近 60 日高低点范围内，日期必须是数据中出现过的交易日，不要编造。"
+    )
+    result = ask_llm(prompt, system=SYSTEM_PROMPT)
+    if result is None:
+        return "大模型调用失败，请检查 LLM_API_KEY 与网络后重试。", None
+    text, raw_hints = _split_annotation_json(result)
+    if not raw_hints:
+        return text, None
+    hints = _sanitize_chart_hints(raw_hints.get("levels"), raw_hints.get("markers"), _load_recent_bars(runtime, code))
+    if not hints["levels"] and not hints["markers"]:
+        return text, None
+    return text, hints
+
+
 def analyze_stock_structured(code: str, name: str, question: str, runtime: Any) -> dict[str, Any]:
-    """B3 结构化分析：返回 {score, trend, risk_level, key_points, conclusion}。"""
+    """B3 结构化分析：返回 {score, trend, risk_level, key_points, conclusion, chart?}。
+
+    ``chart`` 仅在存在有效画线标注时出现，为 {"levels": [...], "markers": [...]}，
+    供看板叠加到行情图上。
+    """
     if not llm_available():
         return {"error": "未配置 LLM_API_KEY，请在 .env 中配置后重试。"}
     context = build_rich_context(runtime, code, name)
@@ -406,13 +560,19 @@ def analyze_stock_structured(code: str, name: str, question: str, runtime: Any) 
         return {"error": "大模型调用失败，请检查 LLM_API_KEY 与网络后重试。"}
     try:
         data = json.loads(_strip_json(raw))
-        return {
+        result = {
             "score": round(_num(data.get("score")), 1),
             "trend": str(data.get("trend") or "中性"),
             "risk_level": str(data.get("risk_level") or "中"),
             "key_points": [str(p) for p in (data.get("key_points") or [])][:5],
             "conclusion": str(data.get("conclusion") or ""),
         }
+        hints = _sanitize_chart_hints(
+            data.get("levels"), data.get("markers"), _load_recent_bars(runtime, code)
+        )
+        if hints["levels"] or hints["markers"]:
+            result["chart"] = hints
+        return result
     except Exception as error:  # noqa: BLE001
         LOG.warning("结构化结果解析失败：%s", error)
         return {"error": "结构化解析失败，已回退原始文本", "raw": raw}

@@ -13,6 +13,7 @@
 - **部署迁移到阿里云 2核4G**（`8.148.153.112`，广州）。旧机「经济型 e 2核2G」是共享 CPU + 2G 内存，跑全市场回测会 OOM 假死 + 共享 CPU 限流变慢；新机 4G 内存治 OOM、固定性能治限流，旧机已释放。→ 见「云服务器部署与更新」。
 - **新增盘后 17:40 拉数据任务 + 日线覆盖率校验**。Tushare 日线收盘后约 17:30 才更新完整，15:30 拉会拿到半截数据（曾只拉到 257/5027 只），故新增 `daily_data_update`（17:40）独立补全当日日线，拉完自动发邮件（含当日只数+覆盖率，成功/不完整/异常都通知）。另新增 `scripts/check_daily_coverage.py` 校验脚本与 `DataService.daily_coverage_report()`。→ 见「日线运行时序」。
 - **AI 智能分析大升级**：喂给大模型的上下文从「技术指标」扩到「行情+指标+行业+事件+大盘+财务+策略信号」多维；输出支持**结构化**（综合评分/趋势/风险等级/要点/结论）；新增**多轮追问**、快捷提问模板、K线+均线+MACD 图表、历史分析记录（`ai_analysis_history` 表）、打字机流式输出、超时重试、数据不足降级。→ 见「AI 智能分析」。
+- **AI 分析图表画线**：大模型分析时同时输出画线标注（关键价位水平线 + 关键日期标记），叠加到行情图上、分析完成后自动展开。两种分析模式均支持；标注经 `_sanitize_chart_hints()` 校验（价格范围 ±5%、日期对齐真实交易日、去重、各限 3 条），防止编造价位压缩坐标轴。→ 见「AI 智能分析」。
 - **事件收集与找股票增强**：事件源扩到 4 个（东方财富/财联社/华尔街见闻/富途牛牛），LLM 抽取公司实体（存 `events.entities`），新增花名别名匹配（`ALIAS_TO_CODE`：宁王→宁德时代、酱香科技→茅台等），跨来源去重，候选多因子排序（相关度+成交额+技术形态），事件有效性回测（`event-effectiveness` 命令）。→ 见「主升浪盘前扫描与富文本报告」。
 - **新增盘前市场快照（9:27）**：每天 9:00 采东财人气榜，9:27 推送「热点题材/板块 + 文字梗概念 + 连续热门核心股 + 亚太市场环境（日经/KOSPI 早盘表现，日韩比 A 股早开 1 小时）」。新增 `hot-stocks` / `word-concepts` 命令。→ 见「主升浪盘前扫描与富文本报告」。
 - **盘中交易起始时点 09:37 → 09:35**。
@@ -563,14 +564,19 @@ python -m ashare_quant.cli retrain-model
 - **指标**：MA5/10/20/60、RSI(14)、MACD/DIF/DEA、近 5/20/60 日涨跌幅、近 60 日最高/最低、量比（近 5 日均量 / 近 60 日均量）、年化波动率，全部为 `ai_analyst.py` 内纯 pandas 实现。
 - **大模型**：复用 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`（`.env` 已配置，默认 DeepSeek `deepseek-chat`），与 `fundamental.py` 的事件抽取共用同一套配置，无需额外新增 key。
 - **无 key 时**：页面给出提示，不影响看板其它功能。
+- **图表画线**（2026-11-09 起）：分析结果同时输出**画线标注**，叠加到行情图（收盘价 + 均线 + 成交量 + MACD）上，分析完成后图表自动展开。两种模式均支持：
+  - 结构化模式：JSON 中的 `levels`（关键价位水平线，support 支撑红 / resistance 压力绿 / stop 止损橙 / target 目标紫）+ `markers`（关键交易日标记，buy 买点红 / sell 卖点绿 / risk 风险橙）；
+  - 文字模式：正文末尾输出 `ANNOTATION_JSON=` 行，解析后从正文剥离，不影响阅读。
+  - 所有标注经 `ai_analyst._sanitize_chart_hints()` 校验：价格必须落在近 130 日最高/最低价 ±5% 内（防止编造价位压缩坐标轴）、日期对齐到真实交易日、类型白名单、同价/同日去重、各最多 3 条。
 - **命令行调用**（可选）：
 
 ```python
 from ashare_quant.services.runtime import build_runtime
-from ashare_quant.ai_analyst import analyze_stock
+from ashare_quant.ai_analyst import analyze_stock, analyze_stock_with_hints
 
 runtime = build_runtime()
 print(analyze_stock("600519", "贵州茅台", "最近一个月走势如何？", runtime))
+text, hints = analyze_stock_with_hints("600519", "贵州茅台", "能买吗？", runtime)  # hints 为画线标注
 ```
 
 > 免责：AI 输出仅供技术面参考，不构成投资建议。系统提示词已内置「结论给依据、明确风险提示、避免绝对化」约束。
