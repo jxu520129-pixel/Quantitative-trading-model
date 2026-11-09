@@ -102,6 +102,52 @@ def after_close(runtime: Runtime) -> None:
     LOG.info("盘后流程完成：更新结果=%s，收盘价离场=%s", update, outcome)
 
 
+def daily_data_update(runtime: Runtime) -> None:
+    """盘后拉取当日日线（独立于 15:30 的 ``after_close``）。
+
+    Tushare 日线约 17:30 才更新完整，15:30 拉取会拿到半截数据（曾只拉到 257 只），
+    故把「当日数据补全」单独放到 17:40 执行，确保当日日线最终完整、供次日盘前扫描与回测使用。
+
+    异常处理：
+    - 非交易日（法定节假日/调休）由 ``_skip_if_holiday`` 自动跳过；
+    - 单标的失败由 ``update_daily`` 内部隔离重试；数据源整体异常在此兜住并告警，不让调度器崩溃；
+    - 拉取后做覆盖率校验，不达标发 WARNING 告警，提示人工补拉。
+    """
+    if _skip_if_holiday(runtime, "盘后拉数据"):
+        return
+    try:
+        update = runtime.data.update_daily()
+    except Exception as error:  # noqa: BLE001 —— 兜住数据源整体异常，告警而非崩溃
+        runtime.notifications.send(
+            "盘后拉数据失败", f"update-data 执行异常：{error}。请检查数据源后手动补拉。", "ERROR",
+        )
+        LOG.exception("盘后拉数据执行异常")
+        return
+    report = runtime.data.daily_coverage_report()
+    if report["complete"]:
+        coverage = report["coverage"]
+        LOG.info(
+            "当日日线拉取完成：最新交易日 %s 共 %d 只，覆盖率 %s（更新 %s）",
+            report["latest_date"], report["latest_count"],
+            f"{coverage:.2%}" if coverage is not None else "无法对比", update,
+        )
+        return
+    if report["coverage"] is not None:
+        detail = (
+            f"最新交易日 {report['latest_date']} 仅 {report['latest_count']} 只，"
+            f"前一交易日 {report['previous_count']} 只，覆盖率 {report['coverage']:.2%}"
+            f"（阈值 {report['threshold']:.0%}）"
+        )
+    else:
+        detail = report["reason"]
+    runtime.notifications.send(
+        "盘后数据不完整",
+        f"17:40 拉取后当日日线仍不完整：{detail}。请检查数据源并手动补拉（update-data）。",
+        "WARNING",
+    )
+    LOG.warning("当日日线拉取后仍不完整（%s），请人工检查", detail)
+
+
 def _close_prices(runtime: Runtime, codes: list[str], trade_date: str | None = None) -> dict[str, float]:
     """取指定标的的**当日**收盘价（盘后离场按收盘价成交）。
 
@@ -244,12 +290,14 @@ def run_scheduler(config_path: str | None = None) -> None:
     signal_h, signal_m = _parse_hhmm(str(sched_cfg["signal_generation"]))
     eod_h, eod_m = _parse_hhmm(str(sched_cfg["end_of_day"]))
     retrain_h, retrain_m = _parse_hhmm(str(sched_cfg.get("retrain", "16:10")))
+    daily_h, daily_m = _parse_hhmm(str(sched_cfg.get("daily_data_update", "17:40")))
     scheduler = BlockingScheduler(timezone=timezone)
     scheduler.add_job(pre_market_scan, CronTrigger(day_of_week="mon-sun", hour=9, minute=25, timezone=timezone), args=[runtime], id="pre_market")
     scheduler.add_job(morning_execution, CronTrigger(day_of_week="mon-sun", hour=morning_h, minute=morning_m, timezone=timezone), args=[runtime], id="morning")
     scheduler.add_job(after_close, CronTrigger(day_of_week="mon-sun", hour=signal_h, minute=signal_m, timezone=timezone), args=[runtime], id="after_close")
     scheduler.add_job(end_of_day, CronTrigger(day_of_week="mon-sun", hour=eod_h, minute=eod_m, timezone=timezone), args=[runtime], id="end_of_day")
     scheduler.add_job(retrain_model, CronTrigger(day_of_week="mon-sun", hour=retrain_h, minute=retrain_m, timezone=timezone), args=[runtime], id="retrain_model")
+    scheduler.add_job(daily_data_update, CronTrigger(day_of_week="mon-sun", hour=daily_h, minute=daily_m, timezone=timezone), args=[runtime], id="daily_data_update")
     # 盘中即时交易：模拟盘买点的唯一入口（实时价成交，不再次日开盘买入）
     intraday_times = tuple(str(t) for t in (sched_cfg.get("intraday_scan_times") or DEFAULT_INTRADAY_TIMES))
     for moment in intraday_times:
@@ -260,8 +308,8 @@ def run_scheduler(config_path: str | None = None) -> None:
             args=[runtime], id=f"intraday_trade_{hour:02d}{minute:02d}",
         )
     LOG.info(
-        "定时调度器已启动，时区=%s；盘中即时交易=%s，晨间结算=%02d:%02d，盘后离场=%02d:%02d，收盘估值=%02d:%02d，模型重训=%02d:%02d",
+        "定时调度器已启动，时区=%s；盘中即时交易=%s，晨间结算=%02d:%02d，盘后离场=%02d:%02d，收盘估值=%02d:%02d，模型重训=%02d:%02d，盘后拉数据=%02d:%02d",
         timezone, ",".join(intraday_times), morning_h, morning_m, signal_h, signal_m,
-        eod_h, eod_m, retrain_h, retrain_m,
+        eod_h, eod_m, retrain_h, retrain_m, daily_h, daily_m,
     )
     scheduler.start()
