@@ -125,11 +125,16 @@ def daily_data_update(runtime: Runtime) -> None:
         return
     report = runtime.data.daily_coverage_report()
     if report["complete"]:
-        coverage = report["coverage"]
+        coverage_text = f"{report['coverage']:.2%}" if report["coverage"] is not None else "无法对比"
+        runtime.notifications.send(
+            "盘后数据更新完成",
+            f"当日日线更新完成：最新交易日 {report['latest_date']} 共 {report['latest_count']} 只，"
+            f"覆盖率 {coverage_text}。",
+            "INFO",
+        )
         LOG.info(
             "当日日线拉取完成：最新交易日 %s 共 %d 只，覆盖率 %s（更新 %s）",
-            report["latest_date"], report["latest_count"],
-            f"{coverage:.2%}" if coverage is not None else "无法对比", update,
+            report["latest_date"], report["latest_count"], coverage_text, update,
         )
         return
     if report["coverage"] is not None:
