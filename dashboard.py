@@ -165,8 +165,56 @@ def _equity_chart_with_marks(equity_curve: list, trades: list) -> None:
     st.altair_chart(chart.properties(height=320), use_container_width=True)
 
 
+def _ai_chart_bars(app, code: str, bars: int = 120):
+    """取 AI 图表用的日线数据（含 MA/MACD 派生列），数据不足返回 None。"""
+    try:
+        frame = app.data.load_bars(code, end_date=None)
+    except Exception:
+        return None
+    if frame is None or frame.empty or "close" not in frame.columns:
+        return None
+    df = frame.tail(bars).reset_index(drop=True)
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    close = pd.to_numeric(df["close"], errors="coerce")
+    df["close"] = close
+    df["open"] = pd.to_numeric(df.get("open", close), errors="coerce")
+    df["high"] = pd.to_numeric(df.get("high", close), errors="coerce")
+    df["low"] = pd.to_numeric(df.get("low", close), errors="coerce")
+    df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce")
+    df["ma5"] = close.rolling(5).mean()
+    df["ma20"] = close.rolling(20).mean()
+    df["ma60"] = close.rolling(60).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["dif"] = ema12 - ema26
+    df["dea"] = df["dif"].ewm(span=9, adjust=False).mean()
+    df["macd"] = (df["dif"] - df["dea"]) * 2
+    df["dir"] = np.where(df["close"] >= df["open"], "up", "down")
+    return df
+
+
+def _auto_annotations(app, code: str, bars: int = 120) -> dict:
+    """AI 未返回画线标注时的兜底：用技术位置（近60日高/低 + MA20）生成标注。"""
+    df = _ai_chart_bars(app, code, bars)
+    if df is None or df.empty:
+        return {"levels": [], "markers": []}
+    tail60 = df.tail(60)
+    high60 = float(tail60["high"].max())
+    low60 = float(tail60["low"].min())
+    last = float(df["close"].iloc[-1])
+    levels = []
+    if high60 > last * 1.005:
+        levels.append({"price": round(high60, 2), "label": "60日高点", "type": "resistance"})
+    if low60 < last * 0.995:
+        levels.append({"price": round(low60, 2), "label": "60日低点", "type": "support"})
+    ma20 = df["ma20"].iloc[-1]
+    if pd.notna(ma20):
+        levels.append({"price": round(float(ma20), 2), "label": "MA20", "type": "other"})
+    return {"levels": levels[:3], "markers": []}
+
+
 def _ai_price_chart(app, code: str, annotations: dict | None = None):
-    """C3：收盘价 + 均线 + 成交量 + MACD 的组合图。数据不足返回 None。
+    """C3：K线（蜡烛）+ 均线 + 成交量 + MACD 的组合图。数据不足返回 None。
 
     ``annotations`` 为 AI 分析返回的画线标注 {"levels": [...], "markers": [...]}：
     - levels：关键价位水平虚线 + 右侧标签（support 红 / resistance 绿 / stop 橙 / target 紫 / other 蓝）；
@@ -177,34 +225,39 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
     _LEVEL_COLORS = {"support": "#ff6b6b", "resistance": "#36c98f", "stop": "#d29922",
                      "target": "#b04a8a", "other": "#58A6FF"}
     _MARKER_COLORS = {"buy": "#ff6b6b", "sell": "#36c98f", "risk": "#d29922", "other": "#58A6FF"}
+    _UP, _DOWN = "#ff6b6b", "#36c98f"  # A 股口径：涨红跌绿
 
-    try:
-        frame = app.data.load_bars(code, end_date=None)
-    except Exception:
+    df = _ai_chart_bars(app, code)
+    if df is None:
         return None
-    if frame is None or frame.empty or "close" not in frame.columns:
-        return None
-    df = frame.tail(120).reset_index(drop=True)
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
-    close = pd.to_numeric(df["close"], errors="coerce")
-    df["ma5"] = close.rolling(5).mean()
-    df["ma20"] = close.rolling(20).mean()
-    df["ma60"] = close.rolling(60).mean()
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    df["dif"] = ema12 - ema26
-    df["dea"] = df["dif"].ewm(span=9, adjust=False).mean()
-    df["macd"] = (df["dif"] - df["dea"]) * 2
 
     base = alt.Chart(df).encode(x=alt.X("trade_date:T", title=None))
+    dir_scale = alt.Scale(domain=["up", "down"], range=[_UP, _DOWN])
+    p_scale = alt.Scale(zero=False)
+    p_axis = alt.Axis(format=".2f")
+    wick = alt.Chart(df).mark_rule(strokeWidth=1).encode(
+        x=alt.X("trade_date:T", title=None),
+        y=alt.Y("low:Q", title="价格", scale=p_scale, axis=p_axis),
+        y2="high:Q",
+        color=alt.Color("dir:N", scale=dir_scale, legend=None),
+        tooltip=[alt.Tooltip("trade_date:T", title="日期"), alt.Tooltip("open:Q", format=".2f"),
+                 alt.Tooltip("high:Q", format=".2f"), alt.Tooltip("low:Q", format=".2f"),
+                 alt.Tooltip("close:Q", format=".2f")],
+    )
+    body = alt.Chart(df).mark_bar(size=3.5).encode(
+        x=alt.X("trade_date:T", title=None),
+        y=alt.Y("open:Q", scale=p_scale, axis=None),
+        y2="close:Q",
+        color=alt.Color("dir:N", scale=dir_scale, legend=None),
+    )
     price = (
-        base.mark_line(color="#58A6FF", strokeWidth=1.6).encode(y=alt.Y("close:Q", title="收盘价", scale=alt.Scale(zero=False)))
-        + base.mark_line(color="#f0b90b", opacity=0.9).encode(y=alt.Y("ma5:Q", title=None))
-        + base.mark_line(color="#e8833a", opacity=0.9).encode(y=alt.Y("ma20:Q", title=None))
-        + base.mark_line(color="#b04a8a", opacity=0.9).encode(y=alt.Y("ma60:Q", title=None))
+        wick + body
+        + base.mark_line(color="#f0b90b", opacity=0.9, strokeWidth=1.2).encode(y=alt.Y("ma5:Q", scale=p_scale, axis=None))
+        + base.mark_line(color="#e8833a", opacity=0.9, strokeWidth=1.2).encode(y=alt.Y("ma20:Q", scale=p_scale, axis=None))
+        + base.mark_line(color="#b04a8a", opacity=0.9, strokeWidth=1.2).encode(y=alt.Y("ma60:Q", scale=p_scale, axis=None))
     )
 
-    # ---- AI 画线标注叠加（字段名统一为 close 以共享 y 轴）----
+    # ---- AI 画线标注叠加（字段名统一为 close，显式共享 y 轴）----
     annotations = annotations or {}
     levels = [lv for lv in (annotations.get("levels") or []) if isinstance(lv, dict)]
     markers = [mk for mk in (annotations.get("markers") or []) if isinstance(mk, dict)]
@@ -223,10 +276,10 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
         lv_df = pd.DataFrame(levels).rename(columns={"price": "close"})
         lv_df["x_end"] = pd.to_datetime(last_x)
         price = price + alt.Chart(lv_df).mark_rule(strokeDash=[4, 4], strokeWidth=1.3).encode(
-            y=alt.Y("close:Q", title=None), color=level_color,
+            y=alt.Y("close:Q", scale=p_scale, axis=None), color=level_color,
         )
         price = price + alt.Chart(lv_df).mark_text(align="left", dx=5, dy=-4, fontSize=10, fontWeight=600).encode(
-            x=alt.X("x_end:T", title=None), y=alt.Y("close:Q", title=None),
+            x=alt.X("x_end:T", title=None), y=alt.Y("close:Q", scale=p_scale, axis=None),
             text="label:N", color=level_color,
         )
     if markers:
@@ -236,28 +289,28 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
             x=alt.X("trade_date:T", title=None), color=marker_color,
         )
         price = price + alt.Chart(mk_df).mark_point(size=70, filled=True, opacity=0.9).encode(
-            x=alt.X("trade_date:T", title=None), y=alt.Y("close:Q", title=None), color=marker_color,
+            x=alt.X("trade_date:T", title=None), y=alt.Y("close:Q", scale=p_scale, axis=None), color=marker_color,
         )
         price = price + alt.Chart(mk_df).mark_text(dy=-11, fontSize=10, fontWeight=600).encode(
-            x=alt.X("trade_date:T", title=None), y=alt.Y("close:Q", title=None),
+            x=alt.X("trade_date:T", title=None), y=alt.Y("close:Q", scale=p_scale, axis=None),
             text="label:N", color=marker_color,
         )
-    price = price.properties(height=220)
+    price = price.properties(height=240)
 
     vol = base.mark_bar(color="#3a4a5a", opacity=0.7).encode(
         y=alt.Y("volume:Q", title="成交量")
-    ).properties(height=90)
+    ).properties(height=80)
     macd_bar = base.mark_bar().encode(
         y=alt.Y("macd:Q", title="MACD"),
         color=alt.condition("datum.macd >= 0", alt.value("#ff6b6b"), alt.value("#36C98F")),
     )
     macd_line = base.mark_line(color="#58A6FF").encode(y=alt.Y("dif:Q")) + base.mark_line(color="#f0b90b").encode(y=alt.Y("dea:Q"))
-    macd = (macd_bar + macd_line).properties(height=110)
-    return alt.vconcat(price, vol, macd).resolve_scale(x="shared")
+    macd = (macd_bar + macd_line).properties(height=100)
+    return alt.vconcat(price, vol, macd).resolve_scale(x="shared", y="shared")
 
 
-def _ai_chart_legend(hints: dict) -> str:
-    """把 AI 画线标注转成一行图例说明（颜色语义 + 具体点位）。"""
+def _ai_chart_legend(hints: dict, with_color_hint: bool = True) -> str:
+    """把画线标注转成一行图例说明（颜色语义 + 具体点位）。"""
     level_names = {"support": "支撑位", "resistance": "压力位", "stop": "止损参考",
                    "target": "目标位", "other": "关键位"}
     marker_names = {"buy": "买点", "sell": "卖点", "risk": "风险点", "other": "关注点"}
@@ -266,9 +319,11 @@ def _ai_chart_legend(hints: dict) -> str:
         parts.append(f"{level_names.get(lv.get('type'), '关键位')} ¥{lv['price']}")
     for mk in hints.get("markers") or []:
         parts.append(f"{mk['date']} {marker_names.get(mk.get('type'), '关注点')}（{mk.get('label', '')}）")
-    legend = "红=支撑/买点　绿=压力/卖点　橙=止损/风险　紫=目标位　蓝=其他"
+    legend = ""
+    if with_color_hint:
+        legend = "红=支撑/买点　绿=压力/卖点　橙=止损/风险　紫=目标位　蓝=其他"
     if parts:
-        legend += "｜" + "，".join(parts)
+        legend = (legend + "｜" if legend else "") + "，".join(parts)
     return legend
 
 
@@ -1136,8 +1191,8 @@ with ai_tab:
                     st.markdown(f"**AI**：{msg['content'][:500]}")
                     st.divider()
 
-    # C3 图表（AI 分析完成后自动带画线标注并展开）
-    chart_code = st.session_state.get("ai_chart_code") or ai_code.strip()
+    # C3 图表：直接展示（不折叠），AI 分析完成后叠加画线标注
+    chart_code = (ai_code.strip() or st.session_state.get("ai_chart_code") or "").strip()
     chart_ann = (
         st.session_state.get("ai_chart_ann")
         if st.session_state.get("ai_chart_code") == chart_code
@@ -1146,10 +1201,21 @@ with ai_tab:
     if chart_code:
         chart = _ai_price_chart(app, chart_code, chart_ann)
         if chart is not None:
-            with st.expander(f"📈 行情图（{chart_code}）", expanded=bool(chart_ann)):
-                if chart_ann:
-                    st.caption(_ai_chart_legend(chart_ann))
+            st.markdown(f"#### 📈 {chart_code} 行情图（近 120 交易日）")
+            ann_used = chart_ann
+            if not (chart_ann and (chart_ann.get("levels") or chart_ann.get("markers"))):
+                ann_used = _auto_annotations(app, chart_code)
+                if ann_used.get("levels"):
+                    st.caption("AI 未给出明确价位，下图标注为技术位置（近 60 日高/低点与 MA20）："
+                               + _ai_chart_legend(ann_used, with_color_hint=False))
+            if chart_ann and (chart_ann.get("levels") or chart_ann.get("markers")):
+                st.caption("AI 分析标注：" + _ai_chart_legend(chart_ann))
+            try:
+                st.altair_chart(chart, width="stretch")
+            except TypeError:
                 st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info(f"{chart_code} 暂无日线数据，无法绘制行情图（可在「配置」页或调度任务里先拉取数据）")
 
     # C4 历史记录
     st.markdown("**历史分析记录**")
