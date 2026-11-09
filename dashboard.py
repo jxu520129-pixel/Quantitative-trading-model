@@ -165,6 +165,53 @@ def _equity_chart_with_marks(equity_curve: list, trades: list) -> None:
     st.altair_chart(chart.properties(height=320), use_container_width=True)
 
 
+def _ai_price_chart(app, code: str):
+    """C3：收盘价 + 均线 + 成交量 + MACD 的组合图。数据不足返回 None。"""
+    import altair as alt
+
+    try:
+        frame = app.data.load_bars(code, end_date=None)
+    except Exception:
+        return None
+    if frame is None or frame.empty or "close" not in frame.columns:
+        return None
+    df = frame.tail(120).reset_index(drop=True)
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    close = pd.to_numeric(df["close"], errors="coerce")
+    df["ma5"] = close.rolling(5).mean()
+    df["ma20"] = close.rolling(20).mean()
+    df["ma60"] = close.rolling(60).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["dif"] = ema12 - ema26
+    df["dea"] = df["dif"].ewm(span=9, adjust=False).mean()
+    df["macd"] = (df["dif"] - df["dea"]) * 2
+
+    base = alt.Chart(df).encode(x=alt.X("trade_date:T", title=None))
+    price = (
+        base.mark_line(color="#58A6FF", strokeWidth=1.6).encode(y=alt.Y("close:Q", title="收盘价", scale=alt.Scale(zero=False)))
+        + base.mark_line(color="#f0b90b", opacity=0.9).encode(y=alt.Y("ma5:Q", title=None))
+        + base.mark_line(color="#e8833a", opacity=0.9).encode(y=alt.Y("ma20:Q", title=None))
+        + base.mark_line(color="#b04a8a", opacity=0.9).encode(y=alt.Y("ma60:Q", title=None))
+    ).properties(height=200)
+    vol = base.mark_bar(color="#3a4a5a", opacity=0.7).encode(
+        y=alt.Y("volume:Q", title="成交量")
+    ).properties(height=90)
+    macd_bar = base.mark_bar().encode(
+        y=alt.Y("macd:Q", title="MACD"),
+        color=alt.condition("datum.macd >= 0", alt.value("#ff6b6b"), alt.value("#36C98F")),
+    )
+    macd_line = base.mark_line(color="#58A6FF").encode(y=alt.Y("dif:Q")) + base.mark_line(color="#f0b90b").encode(y=alt.Y("dea:Q"))
+    macd = (macd_bar + macd_line).properties(height=110)
+    return alt.vconcat(price, vol, macd).resolve_scale(x="shared")
+
+
+def _typewriter(text: str, chunk: int = 6):
+    """C2：把文本切成小块，供 st.write_stream 模拟打字机流式输出。"""
+    for i in range(0, len(text), chunk):
+        yield text[i:i + chunk]
+
+
 def _lab_sample_frame(periods: int = 220) -> pd.DataFrame:
     """用于校验公式语法的最小合成行情。"""
     return pd.DataFrame({
@@ -923,24 +970,109 @@ with settings_tab:
         {"项目": "邮件", "值": "已配置" if app.settings.smtp_host else "未配置"},
     ]), width="stretch", hide_index=True)
 with ai_tab:
-    from ashare_quant.ai_analyst import analyze_stock, llm_available
+    from ashare_quant.ai_analyst import (
+        analyze_stock, analyze_stock_structured, chat_with_history, llm_available,
+    )
 
     st.subheader("AI 智能分析")
-    st.caption("自然语言问股：大模型结合实时行情与技术指标，生成个股分析（不构成投资建议）")
+    st.caption("自然语言问股：大模型结合行情 / 技术指标 / 行业 / 事件 / 财务 / 策略信号，生成个股分析（不构成投资建议）")
     if not llm_available():
         st.warning("未检测到 LLM_API_KEY，请在 .env 中配置后重启看板（默认 DeepSeek）")
+
+    # C1 快捷问题模板
+    quick_qs = ["能不能买？", "止损/止盈位？", "技术面体检", "近期风险点？", "财务/行业怎么样？"]
+    quick_cols = st.columns(len(quick_qs))
+    for i, q in enumerate(quick_qs):
+        if quick_cols[i].button(q, key=f"ai_quick_{i}", use_container_width=True):
+            st.session_state["ai_question"] = q
+
     ai_c1, ai_c2 = st.columns([1, 2])
     with ai_c1:
         ai_code = st.text_input("股票代码", value="600519", key="ai_code", help="6 位代码，如 600519 / 000001")
         ai_name = st.text_input("股票名称（可选）", value="", key="ai_name", help="仅用于展示，可留空")
     with ai_c2:
         ai_question = st.text_input("你想问什么", value="最近一个月走势如何，能买吗？", key="ai_question")
+
+    ai_mode = st.radio("分析模式", ["结构化分析（评分+趋势+风险）", "文字分析"], horizontal=True, key="ai_mode")
+
+    if "ai_history" not in st.session_state:
+        st.session_state["ai_history"] = []
+
     if st.button("生成 AI 分析", type="primary", key="ai_analyze"):
         code = ai_code.strip()
         if not code:
             st.error("请输入股票代码")
         else:
-            with st.spinner("正在取行情、计算指标并调用大模型分析…"):
-                result = analyze_stock(code, ai_name.strip() or code, ai_question.strip(), app)
-            st.markdown("### 分析结果")
-            st.markdown(result)
+            name = ai_name.strip() or code
+            question = ai_question.strip()
+            with st.spinner("正在取行情、行业、事件、财务并调用大模型分析…"):
+                if ai_mode.startswith("结构化"):
+                    result = analyze_stock_structured(code, name, question, app)
+                else:
+                    result = analyze_stock(code, name, question, app)
+
+            if isinstance(result, dict) and "score" in result:
+                cols = st.columns(3)
+                cols[0].metric("综合评分", f"{result['score']}/100")
+                cols[1].metric("趋势", result["trend"])
+                cols[2].metric("风险等级", result["risk_level"])
+                if result.get("key_points"):
+                    st.markdown("**要点**")
+                    for p in result["key_points"]:
+                        st.markdown(f"- {p}")
+                if result.get("conclusion"):
+                    st.markdown("**结论**")
+                    st.markdown(result["conclusion"])
+                result_text = json.dumps(result, ensure_ascii=False)
+            elif isinstance(result, dict) and result.get("error"):
+                st.error(result["error"])
+                result_text = str(result)
+            else:
+                st.markdown("### 分析结果")
+                st.write_stream(_typewriter(str(result)))
+                result_text = str(result)
+
+            # C4 记录历史
+            try:
+                app.database.execute(
+                    "INSERT INTO ai_analysis_history(code,name,question,result,created_at) VALUES(?,?,?,?,?)",
+                    (code, name, question, result_text[:4000], utc_now_text()),
+                )
+            except Exception:
+                pass
+            # B4 会话历史
+            st.session_state["ai_history"].append({"role": "user", "content": f"{name}({code})：{question}"})
+            st.session_state["ai_history"].append({"role": "assistant", "content": result_text[:1500]})
+
+    # B4 追问（带上下文）
+    if st.session_state["ai_history"]:
+        with st.form("ai_followup_form", clear_on_submit=True):
+            followup = st.text_input("继续追问（带上下文）", key="ai_followup", placeholder="例如：那如果跌破 20 日线呢？")
+            if st.form_submit_button("追问", use_container_width=True) and followup.strip():
+                with st.spinner("思考中…"):
+                    reply = chat_with_history(followup.strip(), app, st.session_state["ai_history"])
+                st.session_state["ai_history"].append({"role": "user", "content": followup.strip()})
+                st.session_state["ai_history"].append({"role": "assistant", "content": reply})
+                st.rerun()
+        with st.expander("💬 对话记录", expanded=True):
+            for msg in st.session_state["ai_history"]:
+                if msg["role"] == "user":
+                    st.markdown(f"**你**：{msg['content']}")
+                else:
+                    st.markdown(f"**AI**：{msg['content'][:500]}")
+                    st.divider()
+
+    # C3 图表
+    if ai_code.strip():
+        chart = _ai_price_chart(app, ai_code.strip())
+        if chart is not None:
+            with st.expander("📈 收盘价 + 均线 + 成交量 + MACD", expanded=False):
+                st.altair_chart(chart, use_container_width=True)
+
+    # C4 历史记录
+    st.markdown("**历史分析记录**")
+    runs = app.database.query_all("SELECT code,name,question,created_at FROM ai_analysis_history ORDER BY id DESC LIMIT 10")
+    if runs:
+        st.dataframe(localize_dataframe(pd.DataFrame(runs)), width="stretch", hide_index=True)
+    else:
+        st.caption("暂无历史分析")

@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS model_runs (
     validation_auc REAL NOT NULL, validation_accuracy REAL NOT NULL,
     backend TEXT NOT NULL, parameters_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS ai_analysis_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+    question TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
 """
 
 
