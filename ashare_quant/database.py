@@ -171,10 +171,17 @@ class Database:
         ``initialize``（那会插入演示初始资金、开关等污染数据），但回测落库、
         选股池查询等逻辑仍要求相关表存在。``CREATE TABLE IF NOT EXISTS``
         保证不会破坏已有表与数据。
+
+        另外补齐 events 表的 ``entities`` 列（旧库迁移）：老 hist 库若已存在
+        无该列的 events 表，``CREATE TABLE IF NOT EXISTS`` 不会重建，需显式补列，
+        否则读取 ``entities`` 字段会报 no such column。
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self.connect() as conn:
             conn.executescript(SCHEMA)
+            event_cols = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
+            if "entities" not in event_cols:
+                conn.execute("ALTER TABLE events ADD COLUMN entities TEXT NOT NULL DEFAULT ''")
 
     def initialize(self, initial_cash: float) -> None:
         """建库建表、执行旧库列迁移并写入模拟账户/风控/开关初始状态（幂等）。"""
