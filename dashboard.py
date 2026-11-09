@@ -240,9 +240,11 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
         y=alt.Y("low:Q", title="价格", scale=p_scale, axis=p_axis),
         y2="high:Q",
         color=alt.Color("dir:N", scale=dir_scale, legend=None),
-        tooltip=[alt.Tooltip("trade_date:T", title="日期"), alt.Tooltip("open:Q", format=".2f"),
-                 alt.Tooltip("high:Q", format=".2f"), alt.Tooltip("low:Q", format=".2f"),
-                 alt.Tooltip("close:Q", format=".2f")],
+        tooltip=[alt.Tooltip("trade_date:T", title="日期", format="%Y年%m月%d日"),
+                 alt.Tooltip("open:Q", title="开盘", format=".2f"),
+                 alt.Tooltip("high:Q", title="最高", format=".2f"),
+                 alt.Tooltip("low:Q", title="最低", format=".2f"),
+                 alt.Tooltip("close:Q", title="收盘", format=".2f")],
     )
     body = alt.Chart(df).mark_bar(size=3.5).encode(
         x=alt.X("trade_date:T", title=None),
@@ -309,6 +311,11 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
     # 只共享 x（时间对齐）；y 必须各段独立——若 y 也 shared，价格(≈8元)会被
     # 成交量(≈1亿)的 domain 压成一条线
     chart = alt.vconcat(price, vol, macd).resolve_scale(x="shared")
+    # x 轴日期刻度用中文（默认是英文月份缩写，如 "Nov 9"）
+    try:
+        chart = chart.configure_axisX(format="%m月%d日")
+    except Exception:
+        pass
     # x 轴缩放/平移：框选放大、拖拽平移、双击复位（bind=scales 联动三段）
     try:
         zoom = alt.selection_interval(bind="scales", encodings=["x"], empty="none")
