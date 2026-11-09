@@ -105,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     eff = sub.add_parser("event-effectiveness", help="事件有效性回测：统计事件类型→匹配个股未来N日表现")
     eff.add_argument("--days", type=int, default=20, help="未来交易日数（默认 20）")
     eff.add_argument("--min-events", type=int, default=3, help="事件类型最少样本数（默认 3）")
+    hot = sub.add_parser("hot-stocks", help="核心热度股：识别连续多日人气榜靠前的炒作标的")
+    hot.add_argument("--days", type=int, default=3, help="统计最近 N 个交易日（默认 3）")
+    hot.add_argument("--top-n", type=int, default=50, help="最多返回只数（默认 50）")
+    wc = sub.add_parser("word-concepts", help="文字梗概念：识别热门股简称的高频字概念（如东方字/洋字）")
+    wc.add_argument("--min-count", type=int, default=3, help="最少命中只数（默认 3）")
     hot = sub.add_parser("hot-backtest", help="短线人气·热度共振策略日线近似回测（落库供看板展示）")
     hot.add_argument("--start", default="2025-01-01", help="回测起始日")
     hot.add_argument("--end", default=None, help="回测结束日，默认今天")
@@ -211,6 +216,12 @@ def main() -> None:
     elif args.command == "event-effectiveness":
         from .main_rally import event_effectiveness_report
         print_json(event_effectiveness_report(runtime.database, days=args.days, min_events=args.min_events))
+    elif args.command == "hot-stocks":
+        from .fundamental import core_hot_stocks
+        print_json(core_hot_stocks(runtime.database, days=args.days, top_n=args.top_n))
+    elif args.command == "word-concepts":
+        from .fundamental import detect_word_concepts
+        print_json(detect_word_concepts(runtime.database, min_count=args.min_count))
     elif args.command == "hot-backtest":
         metrics = run_hot_backtest(
             runtime.database, runtime.data, start_date=args.start, end_date=args.end,

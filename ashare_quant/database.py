@@ -138,6 +138,11 @@ CREATE TABLE IF NOT EXISTS ai_analysis_history (
     question TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stock_hot_rank (
+    code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+    rank INTEGER NOT NULL, trade_date TEXT NOT NULL,
+    updated_at TEXT NOT NULL, PRIMARY KEY (code, trade_date)
+);
 """
 
 

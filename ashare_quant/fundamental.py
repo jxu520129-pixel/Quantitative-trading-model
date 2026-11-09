@@ -10,7 +10,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -296,6 +298,48 @@ def fetch_global_events(database: Database, limit: int = 200) -> int:
             })
     except Exception as error:  # noqa: BLE001
         LOG.warning("财联社电报获取失败：%s", error)
+    # 源 3：华尔街见闻快讯流（公开 API，全球财经，无需 key）
+    try:
+        resp = requests.get(
+            "https://api-one.wallstcn.com/apiv1/content/lives",
+            params={"channel": "global-china", "limit": "50"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        wscn_items = (resp.json().get("data", {}).get("items") or [])[:limit]
+        for item in wscn_items:
+            content = re.sub(r"<[^>]+>", "", str(item.get("content_text") or "")).strip()
+            if not content:
+                continue
+            ts = item.get("display_time") or 0
+            try:
+                event_time = datetime.fromtimestamp(int(ts), tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError, OSError):
+                event_time = ""
+            items.append({
+                "title": content[:40],
+                "summary": content[:200],
+                "event_time": event_time,
+                "source": "华尔街见闻",
+            })
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("华尔街见闻快讯获取失败：%s", error)
+    # 源 4：富途牛牛快讯（港美股）
+    try:
+        frame = ak.stock_info_global_futu()
+        for item in frame.head(limit).to_dict("records"):
+            title = str(item.get("标题", "")).strip()
+            if not title or title == "nan":
+                continue
+            items.append({
+                "title": title,
+                "summary": str(item.get("内容", "")).strip()[:200],
+                "event_time": str(item.get("发布时间", "")).strip(),
+                "source": "富途牛牛",
+            })
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("富途牛牛快讯获取失败：%s", error)
 
     if not items:
         return 0
@@ -368,9 +412,109 @@ def fetch_macro_indicators(database: Database, recent: int = 60) -> int:
     return inserted
 
 
+def fetch_stock_hot_rank(database: Database, limit: int = 100) -> int:
+    """采集东财人气榜，写入 ``stock_hot_rank``（按 code+trade_date 覆盖）。返回写入条数。"""
+    import akshare as ak
+
+    try:
+        frame = ak.stock_hot_rank_em()
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("东财人气榜获取失败：%s", error)
+        return 0
+    now = utc_now_text()
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    rows = []
+    for i, item in enumerate(frame.head(limit).to_dict("records"), start=1):
+        code = str(item.get("代码") or item.get("股票代码") or "").strip()
+        name = str(item.get("股票名称") or item.get("名称") or "").strip()
+        if not code:
+            continue
+        rows.append((code, name, i, today, now))
+    if rows:
+        database.executemany(
+            "INSERT OR REPLACE INTO stock_hot_rank(code,name,rank,trade_date,updated_at) VALUES(?,?,?,?,?)",
+            rows,
+        )
+    return len(rows)
+
+
+def core_hot_stocks(database: Database, days: int = 3, top_n: int = 50) -> list[dict[str, Any]]:
+    """识别「连续多日热门」的核心炒作标的。
+
+    对最近 ``days`` 个交易日的人气榜，统计每只股票的上榜天数与最佳排名，
+    综合分 = 上榜天数 × 10 + (30 - 最佳排名)，至少上榜 2 天才算核心标的。
+    返回按综合分降序的列表，供「实体抽取归类」与「文字梗识别」使用。
+    """
+    dates = [
+        r["trade_date"]
+        for r in database.query_all(
+            "SELECT DISTINCT trade_date FROM stock_hot_rank ORDER BY trade_date DESC LIMIT ?", (days,)
+        )
+    ]
+    if len(dates) < 2:
+        return []
+    agg: dict[str, dict[str, Any]] = {}
+    for d in dates:
+        for r in database.query_all(
+            "SELECT code, name, rank FROM stock_hot_rank WHERE trade_date=? ORDER BY rank ASC", (d,)
+        ):
+            code = r["code"]
+            entry = agg.setdefault(code, {"code": code, "name": r["name"], "days": 0, "best_rank": 999})
+            entry["days"] += 1
+            entry["best_rank"] = min(entry["best_rank"], int(r["rank"]))
+    core = []
+    for entry in agg.values():
+        if entry["days"] < 2:
+            continue
+        entry["score"] = entry["days"] * 10 + max(0, 30 - entry["best_rank"])
+        core.append(entry)
+    core.sort(key=lambda x: x["score"], reverse=True)
+    return core[:top_n]
+
+
+# 股票简称里的「通用/行业词」，统计文字梗时排除，避免把「股份」「科技」当成炒作概念
+_STOP_PAIRS = {
+    "股份", "集团", "科技", "控股", "有限", "实业", "国际", "投资", "发展",
+    "电气", "电子", "智能", "能源", "材料", "新材", "生物", "医药", "环保",
+    "证券", "银行", "汽车", "重工", "工业", "建设", "电力", "通信", "信息",
+    "软件", "数据", "传媒", "地产", "食品", "饮料", "光电", "精工", "动力",
+}
+
+
+def detect_word_concepts(database: Database, min_count: int = 3, top_n: int = 100) -> list[dict[str, Any]]:
+    """识别 A 股「文字炒作概念」（如「东方」字、「洋」字、生肖字等）。
+
+    统计核心热门股票简称里的**连续二字组合**（排除通用词），某个二字词在
+    ``min_count`` 只以上热门股票简称里出现，视为一个「XX字概念」。
+    返回按出现次数降序的概念列表，含命中的股票代码。
+    """
+    core = core_hot_stocks(database, days=3, top_n=top_n)
+    if not core:
+        return []
+    pair_count: dict[str, int] = {}
+    pair_stocks: dict[str, list[str]] = {}
+    for c in core:
+        name = c["name"]
+        for i in range(len(name) - 1):
+            pair = name[i:i + 2]
+            if pair in _STOP_PAIRS:
+                continue
+            pair_count[pair] = pair_count.get(pair, 0) + 1
+            stocks = pair_stocks.setdefault(pair, [])
+            if c["code"] not in stocks:
+                stocks.append(c["code"])
+    concepts = []
+    for pair, count in pair_count.items():
+        if count >= min_count:
+            concepts.append({"concept": pair, "count": count, "stocks": pair_stocks[pair][:10]})
+    concepts.sort(key=lambda x: x["count"], reverse=True)
+    return concepts
+
+
 def update_fundamentals(database: Database) -> dict[str, int]:
-    """采集事件 + 宏观数据，返回 {events, macro}。"""
+    """采集事件 + 宏观 + 人气榜数据，返回 {events, macro, hot}。"""
     events = fetch_global_events(database)
     macro = fetch_macro_indicators(database)
-    LOG.info("基本面数据更新完成：事件 %s 条，宏观 %s 条", events, macro)
-    return {"events": events, "macro": macro}
+    hot = fetch_stock_hot_rank(database)
+    LOG.info("基本面数据更新完成：事件 %s 条，宏观 %s 条，人气榜 %s 只", events, macro, hot)
+    return {"events": events, "macro": macro, "hot": hot}
