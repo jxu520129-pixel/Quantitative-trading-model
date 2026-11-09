@@ -279,13 +279,29 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None, bars: int =
     )
     if levels:
         lv_df = pd.DataFrame(levels).rename(columns={"price": "close"})
+        # 标签 = 说明 + 价格（用户要求图上直接标钱数）；价格相近的标签垂直错开防重叠
+        price_span = float(df["close"].max() - df["close"].min()) or 1.0
+        min_gap = price_span * 0.055
+        last_y, bump = None, 0
+        text_y: dict = {}
+        for idx in lv_df["close"].sort_values().index:
+            y = float(lv_df.at[idx, "close"])
+            if last_y is not None and y - last_y < min_gap:
+                bump += 1
+                y = min(last_y + min_gap * bump, float(df["close"].max()) * 1.03)
+            else:
+                bump = 0
+            text_y[idx] = y
+            last_y = y
+        lv_df["text_y"] = pd.Series(text_y)
+        lv_df["text"] = lv_df.apply(lambda r: f"{r['label']} ¥{r['close']:.2f}", axis=1)
         lv_df["x_end"] = pd.to_datetime(last_x)
         price = price + alt.Chart(lv_df).mark_rule(strokeDash=[4, 4], strokeWidth=1.3).encode(
             y=alt.Y("close:Q", scale=p_scale, axis=None), color=level_color,
         )
         price = price + alt.Chart(lv_df).mark_text(align="right", dx=-6, dy=-4, fontSize=10, fontWeight=600).encode(
-            x=alt.X("x_end:T", title=None), y=alt.Y("close:Q", scale=p_scale, axis=None),
-            text="label:N", color=level_color,
+            x=alt.X("x_end:T", title=None), y=alt.Y("text_y:Q", scale=p_scale, axis=None),
+            text="text:N", color=level_color,
         )
     if markers:
         mk_df = pd.DataFrame(markers).rename(columns={"price": "close"})
@@ -1226,6 +1242,12 @@ with ai_tab:
                                + _ai_chart_legend(ann_used, with_color_hint=False))
             if chart_ann and (chart_ann.get("levels") or chart_ann.get("markers")):
                 st.caption("AI 分析标注：" + _ai_chart_legend(chart_ann))
+            # 保险：强制图表画布等比缩进容器宽度，任何环境下都不横向溢出
+            st.markdown(
+                "<style>.stAltairChart,[data-testid='stAltairChart']{max-width:100%!important;overflow-x:hidden!important}"
+                ".stAltairChart canvas,[data-testid='stAltairChart'] canvas{max-width:100%!important;height:auto!important}</style>",
+                unsafe_allow_html=True,
+            )
             try:
                 st.altair_chart(chart, width="stretch")
             except TypeError:
