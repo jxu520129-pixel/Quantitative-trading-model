@@ -213,12 +213,14 @@ def _auto_annotations(app, code: str, bars: int = 120) -> dict:
     return {"levels": levels[:3], "markers": []}
 
 
-def _ai_price_chart(app, code: str, annotations: dict | None = None):
+def _ai_price_chart(app, code: str, annotations: dict | None = None, bars: int = 120):
     """C3：K线（蜡烛）+ 均线 + 成交量 + MACD 的组合图。数据不足返回 None。
 
     ``annotations`` 为 AI 分析返回的画线标注 {"levels": [...], "markers": [...]}：
     - levels：关键价位水平虚线 + 右侧标签（support 红 / resistance 绿 / stop 橙 / target 紫 / other 蓝）；
     - markers：关键交易日垂直虚线 + 圆点 + 标签（buy 红 / sell 绿 / risk 橙 / other 蓝）。
+    ``bars`` 控制 K 线根数（60=蜡烛粗、250=看得远），不提供自由拖拽缩放——
+    bind=scales 框选会把 y 轴 domain 拖坏导致价格消失（踩过）。
     """
     import altair as alt
 
@@ -227,9 +229,10 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
     _MARKER_COLORS = {"buy": "#ff6b6b", "sell": "#36c98f", "risk": "#d29922", "other": "#58A6FF"}
     _UP, _DOWN = "#ff6b6b", "#36c98f"  # A 股口径：涨红跌绿
 
-    df = _ai_chart_bars(app, code)
+    df = _ai_chart_bars(app, code, bars)
     if df is None:
         return None
+    bar_px = 6 if bars <= 60 else (3.5 if bars <= 120 else 2)
 
     base = alt.Chart(df).encode(x=alt.X("trade_date:T", title=None))
     dir_scale = alt.Scale(domain=["up", "down"], range=[_UP, _DOWN])
@@ -246,7 +249,7 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
                  alt.Tooltip("low:Q", title="最低", format=".2f"),
                  alt.Tooltip("close:Q", title="收盘", format=".2f")],
     )
-    body = alt.Chart(df).mark_bar(size=3.5).encode(
+    body = alt.Chart(df).mark_bar(size=bar_px).encode(
         x=alt.X("trade_date:T", title=None),
         y=alt.Y("open:Q", scale=p_scale, axis=None),
         y2="close:Q",
@@ -314,12 +317,6 @@ def _ai_price_chart(app, code: str, annotations: dict | None = None):
     # x 轴日期刻度用中文（默认是英文月份缩写，如 "Nov 9"）
     try:
         chart = chart.configure_axisX(format="%m月%d日")
-    except Exception:
-        pass
-    # x 轴缩放/平移：框选放大、拖拽平移、双击复位（bind=scales 联动三段）
-    try:
-        zoom = alt.selection_interval(bind="scales", encodings=["x"], empty="none")
-        chart = chart.add_params(zoom)
     except Exception:
         pass
     return chart
@@ -1208,6 +1205,9 @@ with ai_tab:
                     st.divider()
 
     # C3 图表：直接展示（不折叠），AI 分析完成后叠加画线标注
+    bars_choice = st.radio("K 线区间", ["近 60 日", "近 120 日", "近 250 日"],
+                           horizontal=True, key="ai_chart_bars", index=1)
+    chart_bars = int(bars_choice.replace("近 ", "").replace(" 日", ""))
     chart_code = (ai_code.strip() or st.session_state.get("ai_chart_code") or "").strip()
     chart_ann = (
         st.session_state.get("ai_chart_ann")
@@ -1215,12 +1215,12 @@ with ai_tab:
         else None
     )
     if chart_code:
-        chart = _ai_price_chart(app, chart_code, chart_ann)
+        chart = _ai_price_chart(app, chart_code, chart_ann, bars=chart_bars)
         if chart is not None:
-            st.markdown(f"#### 📈 {chart_code} 行情图（近 120 交易日）")
+            st.markdown(f"#### 📈 {chart_code} 行情图（{bars_choice}）")
             ann_used = chart_ann
             if not (chart_ann and (chart_ann.get("levels") or chart_ann.get("markers"))):
-                ann_used = _auto_annotations(app, chart_code)
+                ann_used = _auto_annotations(app, chart_code, bars=chart_bars)
                 if ann_used.get("levels"):
                     st.caption("AI 未给出明确价位，下图标注为技术位置（近 60 日高/低点与 MA20）："
                                + _ai_chart_legend(ann_used, with_color_hint=False))
