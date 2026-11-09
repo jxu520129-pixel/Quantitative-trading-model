@@ -518,3 +518,87 @@ def update_fundamentals(database: Database) -> dict[str, int]:
     hot = fetch_stock_hot_rank(database)
     LOG.info("基本面数据更新完成：事件 %s 条，宏观 %s 条，人气榜 %s 只", events, macro, hot)
     return {"events": events, "macro": macro, "hot": hot}
+
+
+# 亚太主要指数代码 → 中文名（用于盘前市场环境，日韩比 A 股早开 1 小时可提前反映情绪）
+_APAC_INDEX_CODES: dict[str, str] = {
+    "N225": "日经225", "KS11": "韩国KOSPI", "HSI": "恒生指数",
+    "TWII": "台湾加权", "000001": "上证指数", "399001": "深证成指",
+}
+
+
+def fetch_global_index_spot() -> dict[str, dict[str, Any]]:
+    """拿亚太主要指数的实时行情（涨跌幅），供盘前市场环境分析。返回 {名称: {price, pct}}。"""
+    import akshare as ak
+
+    try:
+        frame = ak.index_global_spot_em()
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("全球指数获取失败：%s", error)
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in frame.to_dict("records"):
+        code = str(item.get("代码", ""))
+        name = _APAC_INDEX_CODES.get(code)
+        if not name:
+            continue
+        result[name] = {
+            "price": item.get("最新价"),
+            "pct": item.get("涨跌幅"),
+        }
+    return result
+
+
+def fetch_hot_sectors(limit: int = 10) -> list[dict[str, Any]]:
+    """拿东财行业板块涨幅排名（热门板块），返回 [{name, pct, leader}]。"""
+    import akshare as ak
+
+    try:
+        frame = ak.stock_board_industry_name_em()
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("行业板块获取失败：%s", error)
+        return []
+    sectors = []
+    for item in frame.head(limit).to_dict("records"):
+        name = str(item.get("板块名称", "")).strip()
+        pct = _num(item.get("涨跌幅"))
+        leader = str(item.get("领涨股票", "")).strip()
+        if not name:
+            continue
+        sectors.append({"name": name, "pct": round(pct, 2), "leader": leader})
+    return sectors
+
+
+def build_market_snapshot(database: Database) -> str:
+    """组装盘前市场快照（9:27）：亚太市场环境 + 热门板块 + 文字概念 + 连续热门核心股。"""
+    lines: list[str] = []
+    # 1. 亚太市场环境（日韩股市早盘表现）
+    global_idx = fetch_global_index_spot()
+    if global_idx:
+        lines.append("【亚太市场环境】")
+        for name, info in global_idx.items():
+            pct = info.get("pct")
+            if pct is None:
+                continue
+            arrow = "🔺" if float(pct) > 0 else ("🔻" if float(pct) < 0 else "➖")
+            lines.append(f"{arrow} {name}：{float(pct):+.2f}%")
+    # 2. 热门板块
+    sectors = fetch_hot_sectors(limit=8)
+    if sectors:
+        lines.append("【热门板块（涨幅靠前）】")
+        for s in sectors:
+            leader = f"（领涨 {s['leader']}）" if s.get("leader") else ""
+            lines.append(f"- {s['name']} {s['pct']:+.2f}%{leader}")
+    # 3. 文字梗概念
+    concepts = detect_word_concepts(database)
+    if concepts:
+        lines.append("【热门文字概念】")
+        for c in concepts[:5]:
+            lines.append(f"- 「{c['concept']}」字概念（{c['count']} 只）")
+    # 4. 连续热门核心股
+    core = core_hot_stocks(database, days=3)
+    if core:
+        lines.append("【连续热门核心股】")
+        for s in core[:10]:
+            lines.append(f"- {s['name']}({s['code']}) 连续上榜 {s['days']} 天")
+    return "\n".join(lines) if lines else "（暂无盘前市场快照数据）"

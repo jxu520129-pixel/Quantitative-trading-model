@@ -153,6 +153,33 @@ def daily_data_update(runtime: Runtime) -> None:
     LOG.warning("当日日线拉取后仍不完整（%s），请人工检查", detail)
 
 
+def collect_hot_rank(runtime: Runtime) -> None:
+    """盘前热度采集（09:00）：抓东财人气榜写入 stock_hot_rank，供 09:27 快照与核心股识别。"""
+    if _skip_if_holiday(runtime, "热度采集"):
+        return
+    try:
+        from .fundamental import fetch_stock_hot_rank
+
+        count = fetch_stock_hot_rank(runtime.database)
+        LOG.info("盘前热度采集完成：%s 只", count)
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("盘前热度采集失败：%s", error)
+
+
+def pre_market_hot_scan(runtime: Runtime) -> None:
+    """盘前市场快照（09:27）：热点题材/板块 + 文字概念 + 亚太市场环境（日韩股市早盘表现）。"""
+    if _skip_if_holiday(runtime, "盘前市场快照"):
+        return
+    try:
+        from .fundamental import build_market_snapshot
+
+        snapshot = build_market_snapshot(runtime.database)
+        runtime.notifications.send("盘前市场快照", snapshot, "INFO")
+        LOG.info("盘前市场快照：%s", snapshot.replace("\n", " / "))
+    except Exception as error:  # noqa: BLE001
+        LOG.warning("盘前市场快照失败：%s", error)
+
+
 def _close_prices(runtime: Runtime, codes: list[str], trade_date: str | None = None) -> dict[str, float]:
     """取指定标的的**当日**收盘价（盘后离场按收盘价成交）。
 
@@ -296,8 +323,12 @@ def run_scheduler(config_path: str | None = None) -> None:
     eod_h, eod_m = _parse_hhmm(str(sched_cfg["end_of_day"]))
     retrain_h, retrain_m = _parse_hhmm(str(sched_cfg.get("retrain", "16:10")))
     daily_h, daily_m = _parse_hhmm(str(sched_cfg.get("daily_data_update", "17:40")))
+    hot_h, hot_m = _parse_hhmm(str(sched_cfg.get("hot_rank_collect", "09:00")))
+    snapshot_h, snapshot_m = _parse_hhmm(str(sched_cfg.get("market_snapshot", "09:27")))
     scheduler = BlockingScheduler(timezone=timezone)
     scheduler.add_job(pre_market_scan, CronTrigger(day_of_week="mon-sun", hour=9, minute=25, timezone=timezone), args=[runtime], id="pre_market")
+    scheduler.add_job(collect_hot_rank, CronTrigger(day_of_week="mon-sun", hour=hot_h, minute=hot_m, timezone=timezone), args=[runtime], id="hot_rank_collect")
+    scheduler.add_job(pre_market_hot_scan, CronTrigger(day_of_week="mon-sun", hour=snapshot_h, minute=snapshot_m, timezone=timezone), args=[runtime], id="market_snapshot")
     scheduler.add_job(morning_execution, CronTrigger(day_of_week="mon-sun", hour=morning_h, minute=morning_m, timezone=timezone), args=[runtime], id="morning")
     scheduler.add_job(after_close, CronTrigger(day_of_week="mon-sun", hour=signal_h, minute=signal_m, timezone=timezone), args=[runtime], id="after_close")
     scheduler.add_job(end_of_day, CronTrigger(day_of_week="mon-sun", hour=eod_h, minute=eod_m, timezone=timezone), args=[runtime], id="end_of_day")
@@ -313,8 +344,8 @@ def run_scheduler(config_path: str | None = None) -> None:
             args=[runtime], id=f"intraday_trade_{hour:02d}{minute:02d}",
         )
     LOG.info(
-        "定时调度器已启动，时区=%s；盘中即时交易=%s，晨间结算=%02d:%02d，盘后离场=%02d:%02d，收盘估值=%02d:%02d，模型重训=%02d:%02d，盘后拉数据=%02d:%02d",
+        "定时调度器已启动，时区=%s；盘中即时交易=%s，晨间结算=%02d:%02d，盘后离场=%02d:%02d，收盘估值=%02d:%02d，模型重训=%02d:%02d，盘后拉数据=%02d:%02d，热度采集=%02d:%02d，盘前快照=%02d:%02d",
         timezone, ",".join(intraday_times), morning_h, morning_m, signal_h, signal_m,
-        eod_h, eod_m, retrain_h, retrain_m, daily_h, daily_m,
+        eod_h, eod_m, retrain_h, retrain_m, daily_h, daily_m, hot_h, hot_m, snapshot_h, snapshot_m,
     )
     scheduler.start()
