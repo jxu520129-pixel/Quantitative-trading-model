@@ -1233,10 +1233,27 @@ with ai_tab:
         else:
             st.info(f"{chart_code} 暂无日线数据，无法绘制行情图（可在「配置」页或调度任务里先拉取数据）")
 
-    # C4 历史记录
+    # C4 历史记录（支持单条删除 + 清空）
     st.markdown("**历史分析记录**")
-    runs = app.database.query_all("SELECT code,name,question,created_at FROM ai_analysis_history ORDER BY id DESC LIMIT 10")
+    runs = app.database.query_all(
+        "SELECT id,code,name,question,created_at FROM ai_analysis_history ORDER BY id DESC LIMIT 10"
+    )
     if runs:
-        st.dataframe(localize_dataframe(pd.DataFrame(runs)), width="stretch", hide_index=True)
+        for r in runs:
+            c1, c2 = st.columns([9, 1])
+            c1.markdown(
+                f"**{r['name']}（{r['code']}）** · {r['question']}"
+                f"　<small style='color:#8a99a6'>{r['created_at']}</small>",
+                unsafe_allow_html=True,
+            )
+            if c2.button("删除", key=f"del_ai_{r['id']}", use_container_width=True):
+                app.database.execute("DELETE FROM ai_analysis_history WHERE id=?", (r["id"],))
+                st.rerun()
+        with st.expander("清空全部历史", expanded=False):
+            confirm = st.checkbox("我确认要删除全部 AI 分析历史记录", key="ai_clear_confirm")
+            if st.button("清空全部", key="ai_clear_btn", disabled=not confirm, use_container_width=True):
+                app.database.execute("DELETE FROM ai_analysis_history")
+                st.session_state["ai_clear_confirm"] = False
+                st.rerun()
     else:
         st.caption("暂无历史分析")
