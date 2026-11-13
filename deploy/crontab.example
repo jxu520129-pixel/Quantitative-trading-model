@@ -11,7 +11,7 @@
 26 9 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli execute-orders >> logs/cron.log 2>&1
 
 # 盘中即时交易：实时价扫描 → 先卖后买即时成交（5 个时点）
-37 9 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
+35 9 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
 0 10 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
 30 10 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
 30 14 * * 1-5 cd /opt/ashare-quant && .venv/bin/python -m ashare_quant.cli intraday-trade >> logs/cron.log 2>&1
