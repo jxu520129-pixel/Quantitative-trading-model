@@ -35,6 +35,11 @@ class OrderStatus(str, Enum):
     FAILED = "FAILED"
 
 
+# 委托类型（order_type 列）：普通委托 / 涨停排单（挂涨停价排队，涨停打开才成交）
+ORDER_TYPE_NORMAL = "NORMAL"
+ORDER_TYPE_LIMIT_UP_QUEUE = "LIMIT_UP_QUEUE"
+
+
 class TradeMode(str, Enum):
     """交易模式：PAPER 模拟盘 / LIVE 实盘。V1 默认且仅落地 PAPER。"""
 
@@ -69,6 +74,7 @@ class OrderRequest:
     requested_price: Optional[float] = None
     reason: str = ""
     name: str = ""
+    order_type: str = "NORMAL"
     id: str = field(default_factory=lambda: uuid4().hex)
 
 

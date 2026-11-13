@@ -38,6 +38,8 @@ VALUE_LABELS = {
     "FAILED": "执行失败",
     "SKIPPED": "已跳过",
     "DEFERRED": "已延后",
+    "NORMAL": "普通",
+    "LIMIT_UP_QUEUE": "涨停排单",
     "INFO": "提示",
     "WARNING": "警告",
     "ERROR": "错误",
@@ -74,6 +76,8 @@ COLUMN_LABELS = {
     "as_of_date": "信号日期",
     "snapshot_date": "净值日期",
     "filled_at": "成交时间",
+    "submitted_at": "下单时间",
+    "order_type": "委托类型",
     "created_at": "创建时间",
     "updated_at": "更新时间",
     "event_time": "事件时间",
@@ -211,7 +215,7 @@ def localize_dataframe(frame: pd.DataFrame) -> pd.DataFrame:
     for column in result.columns:
         if column in {"reason", "error", "message"}:
             result[column] = result[column].map(label_message)
-        elif column in {"strategy", "side", "action", "status", "level", "category", "mode", "source"} | _BOOLEAN_COLUMNS:
+        elif column in {"strategy", "side", "action", "status", "order_type", "level", "category", "mode", "source"} | _BOOLEAN_COLUMNS:
             result[column] = result[column].map(lambda value: label_value(value, column))
     return result.rename(columns=COLUMN_LABELS)
 

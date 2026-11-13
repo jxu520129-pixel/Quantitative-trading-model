@@ -7,7 +7,10 @@ from typing import Any
 from ..config import Settings
 from ..database import Database
 from ..market_rules import LOT_SIZE, TradingCosts, at_limit, board_price_limit, round_to_lot
-from ..models import Account, OrderRequest, OrderSide, OrderStatus, Position, market_open_fill_time, utc_now_text
+from ..models import (
+    Account, OrderRequest, OrderSide, OrderStatus, Position,
+    ORDER_TYPE_LIMIT_UP_QUEUE, beijing_now_text, market_open_fill_time, utc_now_text,
+)
 from ..risk import RiskManager
 from ..utils import normalize_date
 from .base import Broker
@@ -42,14 +45,19 @@ class PaperBroker(Broker):
         return [Position(**row) for row in rows]
 
     def submit_order(self, request: OrderRequest) -> str:
-        """校验整手后把委托以 PENDING 状态落库，返回委托 id。"""
+        """校验整手后把委托以 PENDING 状态落库，返回委托 id。
+
+        落库同时记录 ``submitted_at``（北京时间下单时间，供看板展示准确的
+        下单时刻，不再用 UTC 的 created_at 兜底）与 ``order_type``（普通/涨停排单）。
+        """
         if request.quantity <= 0 or request.quantity % LOT_SIZE != 0:
             raise ValueError(f"A 股委托数量必须是大于 0 的 {LOT_SIZE} 股整数倍")
         self.database.execute(
-            """INSERT INTO orders(id,code,name,side,quantity,requested_price,status,strategy,trade_date,reason,error,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?, ?,?,?,?, ?,?)""",
+            """INSERT INTO orders(id,code,name,side,quantity,requested_price,status,strategy,trade_date,reason,error,created_at,updated_at,submitted_at,order_type)
+               VALUES(?,?,?,?,?,?,?, ?,?,?,?, ?,?, ?,?)""",
             (request.id, request.code, request.name, request.side.value, request.quantity, request.requested_price,
-             OrderStatus.PENDING.value, request.strategy, normalize_date(request.trade_date), request.reason, "", utc_now_text(), utc_now_text()),
+             OrderStatus.PENDING.value, request.strategy, normalize_date(request.trade_date), request.reason, "",
+             utc_now_text(), utc_now_text(), beijing_now_text(), request.order_type),
         )
         return request.id
 
@@ -111,6 +119,10 @@ class PaperBroker(Broker):
                 continue
             try:
                 if at_limit(float(bar["open"]), bar.get("pre_close"), order["code"], order["side"]):
+                    # 涨停排单：买入仍封板时**继续排队**（不拒绝、不成交），
+                    # 等后续盘中时点涨停打开（实时价 < 涨停价）再按实时价成交。
+                    if order["side"] == "BUY" and order.get("order_type") == ORDER_TYPE_LIMIT_UP_QUEUE:
+                        continue
                     pre_close = float(bar.get("pre_close") or 0)
                     open_price = float(bar["open"])
                     limit_pct = board_price_limit(order["code"], is_st=False)

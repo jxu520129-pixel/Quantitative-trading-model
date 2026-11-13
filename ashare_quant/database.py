@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', side TEXT NOT NULL,
     quantity INTEGER NOT NULL, requested_price REAL, fill_price REAL, filled_quantity INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL, strategy TEXT NOT NULL, trade_date TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
-    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    submitted_at TEXT NOT NULL DEFAULT '', order_type TEXT NOT NULL DEFAULT 'NORMAL'
 );
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, trade_date);
 CREATE TABLE IF NOT EXISTS fills (
@@ -182,6 +183,12 @@ class Database:
             event_cols = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
             if "entities" not in event_cols:
                 conn.execute("ALTER TABLE events ADD COLUMN entities TEXT NOT NULL DEFAULT ''")
+            # 迁移：旧 orders 表补「下单时间」与「委托类型（普通/涨停排单）」列
+            order_cols = {row["name"] for row in conn.execute("PRAGMA table_info(orders)")}
+            if "submitted_at" not in order_cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN submitted_at TEXT NOT NULL DEFAULT ''")
+            if "order_type" not in order_cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN order_type TEXT NOT NULL DEFAULT 'NORMAL'")
 
     def initialize(self, initial_cash: float) -> None:
         """建库建表、执行旧库列迁移并写入模拟账户/风控/开关初始状态（幂等）。"""
@@ -214,6 +221,14 @@ class Database:
                 # 旧持仓无建仓期箱体基准，用成本价兜底（跌破成本即触发箱体离场）
                 conn.execute("ALTER TABLE positions ADD COLUMN entry_breakout REAL NOT NULL DEFAULT 0")
                 conn.execute("UPDATE positions SET entry_breakout=avg_cost WHERE entry_breakout<=0")
+            # 迁移：旧 orders 表补「下单时间」（北京时间）与「委托类型（普通/涨停排单）」列
+            order_cols = {row["name"] for row in conn.execute("PRAGMA table_info(orders)")}
+            if "submitted_at" not in order_cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN submitted_at TEXT NOT NULL DEFAULT ''")
+                # 存量行没有下单时间，用 created_at（UTC）补 +8h 得到北京时间，避免展示差 8 小时
+                conn.execute("UPDATE orders SET submitted_at=datetime(created_at,'+8 hours') WHERE submitted_at=''")
+            if "order_type" not in order_cols:
+                conn.execute("ALTER TABLE orders ADD COLUMN order_type TEXT NOT NULL DEFAULT 'NORMAL'")
             # 一次性数据迁移：risk_events.event_time 此前写的是 UTC，而看板直接原样展示，
             # 结果比北京时间早 8 小时——风险事件看起来像系统凌晨在交易（2026-09-16 用户反馈）。
             # risk.py 已改写北京时间，这里把存量行整体 +8h；用 system_settings 标记保证只跑一次。

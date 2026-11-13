@@ -9,7 +9,7 @@
 - 止损/离场以实时价即时卖出，不等次日开盘；
 - 单日新开名额、同一交易日不重复买同一只；
 - 实时行情不可用（含 market_quotes 里的残留旧价）时跳过、不做任何成交；
-- 盘中不追涨停。
+- 盘中不追涨停：涨停股改为**涨停排单**（挂涨停价排队，涨停打开才成交，收盘自动撤单）。
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ def test_intraday_skips_when_quotes_unavailable(tmp_path: Path):
         quotes={}, candidates=_candidates([("600000", "浦发银行", price, 8.0e8)])
     )
 
-    assert outcome == {"buy_filled": 0, "buy_rejected": 0, "sell_filled": 0,
+    assert outcome == {"buy_filled": 0, "buy_queued": 0, "buy_rejected": 0, "sell_filled": 0,
                        "sell_rejected": 0, "failed": 0, "skipped": 1}
     assert database.query_all("SELECT * FROM orders") == []
 
@@ -177,8 +177,8 @@ def test_intraday_second_tick_does_not_rebuy_same_symbol(tmp_path: Path):
         assert len(orders) == 1, f"{code} 当日不应重复下单"
 
 
-def test_intraday_rejects_limit_up_buy(tmp_path: Path):
-    """盘中不追涨停：实时价已达涨停则拒单。"""
+def test_intraday_queues_limit_up_buy(tmp_path: Path):
+    """盘中不追涨停：实时价已达涨停改为**涨停排单**（挂涨停价 PENDING 排队）。"""
     _settings, database, _broker, _signals, trading = make_services(tmp_path)
     day = today_text()
     bar = database.query_one(
@@ -193,14 +193,78 @@ def test_intraday_rejects_limit_up_buy(tmp_path: Path):
     )
 
     assert outcome["buy_filled"] == 0
-    assert outcome["buy_rejected"] == 1
+    assert outcome["buy_queued"] == 1
     order = database.query_one("SELECT * FROM orders WHERE code='600000'")
-    assert order["status"] == "REJECTED"
-    assert "涨停拦截" in order["error"]
+    assert order["status"] == "PENDING", "涨停应挂排单等待，而非直接拒单"
+    assert order["order_type"] == "LIMIT_UP_QUEUE"
+    assert float(order["requested_price"]) == limit_price, "排单应挂涨停价"
 
 
-def test_limit_up_rejection_does_not_trip_circuit_breaker(tmp_path: Path):
-    """涨停买不进是市场性拒单，不计入连续失败熔断（曾连刷 3 次把交易暂停）。"""
+def test_limit_up_queue_fills_when_limit_opens(tmp_path: Path):
+    """涨停排单在后续盘中时点涨停打开（实时价 < 涨停价）后按实时价成交。"""
+    _settings, database, broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    bar = database.query_one(
+        "SELECT close, pre_close FROM daily_bars WHERE code='600000' ORDER BY trade_date DESC LIMIT 1"
+    )
+    pre_close = float(bar["pre_close"] or bar["close"])
+    limit_price = round(pre_close * 1.10, 2)
+
+    trading.execute_intraday(
+        quotes={"600000": _quote(limit_price, day)},
+        candidates=_candidates([("600000", "浦发银行", limit_price, 8.0e8)]),
+    )
+    assert database.query_one("SELECT status FROM orders WHERE code='600000'")["status"] == "PENDING"
+
+    open_price = round(limit_price * 0.99, 2)  # 涨停打开，回落 1%
+    outcome = trading.execute_intraday(quotes={"600000": _quote(open_price, day)}, candidates=[])
+
+    assert outcome["buy_filled"] == 1
+    order = database.query_one("SELECT * FROM orders WHERE code='600000'")
+    assert order["status"] == "FILLED"
+    assert any(item.code == "600000" for item in broker.get_positions())
+
+
+def test_cancel_limit_up_queues_at_close(tmp_path: Path):
+    """收盘仍未成交的涨停排单自动撤单。"""
+    _settings, database, _broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    bar = database.query_one(
+        "SELECT close, pre_close FROM daily_bars WHERE code='600000' ORDER BY trade_date DESC LIMIT 1"
+    )
+    pre_close = float(bar["pre_close"] or bar["close"])
+    limit_price = round(pre_close * 1.10, 2)
+
+    trading.execute_intraday(
+        quotes={"600000": _quote(limit_price, day)},
+        candidates=_candidates([("600000", "浦发银行", limit_price, 8.0e8)]),
+    )
+    cancelled = trading.cancel_limit_up_queues(day)
+
+    assert cancelled == 1
+    order = database.query_one("SELECT * FROM orders WHERE code='600000'")
+    assert order["status"] == "CANCELLED"
+    assert "收盘自动撤单" in order["error"]
+
+
+def test_order_records_submitted_at(tmp_path: Path):
+    """委托记录下单时间（submitted_at，北京时间），不再依赖 UTC 的 created_at。"""
+    _settings, database, _broker, _signals, trading = make_services(tmp_path)
+    day = today_text()
+    price = _latest_close(database, "600000")
+
+    trading.execute_intraday(
+        quotes={"600000": _quote(price, day)},
+        candidates=_candidates([("600000", "浦发银行", price, 8.0e8)]),
+    )
+
+    order = database.query_one("SELECT * FROM orders WHERE code='600000'")
+    assert order["submitted_at"], "下单时间应落库（北京时间）"
+    assert order["submitted_at"].startswith(day), "下单时间应与交易日同一天（北京时间口径）"
+
+
+def test_limit_up_queue_does_not_trip_circuit_breaker(tmp_path: Path):
+    """涨停排单是排队等待，不是执行失败，不计入连续失败熔断，也不产生拒单审计。"""
     settings, database, _broker, _signals, trading = make_services(tmp_path)
     day = today_text()
     bar = database.query_one(
@@ -219,8 +283,7 @@ def test_limit_up_rejection_does_not_trip_circuit_breaker(tmp_path: Path):
     events = database.query_all(
         "SELECT * FROM risk_events WHERE code='600000' AND category='ORDER_REJECTED'"
     )
-    assert events, "拒单仍要留审计记录（级别=警告）"
-    assert events[0]["level"] == "WARNING"
+    assert not events, "排单不是拒单，不应产生 ORDER_REJECTED 审计事件"
 
 
 def test_intraday_rejected_symbol_not_retried_same_day(tmp_path: Path):

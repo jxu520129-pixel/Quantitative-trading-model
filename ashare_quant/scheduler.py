@@ -42,14 +42,15 @@ def _intraday_summary(outcome: dict) -> str:
         return "本次未成交：实时行情不可用。"
     buys = f"买入成交 {outcome['buy_filled']} 笔"
     sells = f"卖出成交 {outcome['sell_filled']} 笔"
+    queued = f"、涨停排单 {outcome['buy_queued']} 笔" if outcome.get("buy_queued") else ""
     if outcome["buy_rejected"] or outcome["sell_rejected"]:
         detail = f"（买入被拒 {outcome['buy_rejected']}、卖出被拒 {outcome['sell_rejected']}）"
     else:
         detail = ""
     if outcome["failed"]:
         detail += f"（执行失败 {outcome['failed']}）"
-    tail = "。" if (outcome["buy_filled"] or outcome["sell_filled"]) else "，本次无成交。"
-    return f"本次盘中即时撮合：{buys}、{sells}{detail}{tail}"
+    tail = "。" if (outcome["buy_filled"] or outcome["sell_filled"] or outcome.get("buy_queued")) else "，本次无成交。"
+    return f"本次盘中即时撮合：{buys}、{sells}{queued}{detail}{tail}"
 
 
 def after_close(runtime: Runtime) -> None:
@@ -61,6 +62,15 @@ def after_close(runtime: Runtime) -> None:
     """
     if _skip_if_holiday(runtime, "盘后流程"):
         return
+    # 收盘自动撤掉当日仍未成交的涨停排单（与数据覆盖率无关，无条件执行，
+    # 否则委托会永远挂 PENDING 跨日）
+    cancelled = runtime.trading.cancel_limit_up_queues()
+    if cancelled:
+        runtime.notifications.send(
+            "涨停排单已撤",
+            f"收盘前 {cancelled} 笔涨停排单未成交（一直封板），已自动撤单。",
+            "INFO",
+        )
     if not runtime.control.get_bool("strategy_enabled", True):
         LOG.info("看板已关闭策略运行")
         return

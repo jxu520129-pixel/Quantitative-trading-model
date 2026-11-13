@@ -1063,8 +1063,8 @@ with orders:
     scoped = order_filter != "全部"
     st.subheader("委托记录")
     st.dataframe(localize_dataframe(frame(
-        "SELECT trade_date,code,name,side,quantity,fill_price,status,strategy,error,created_at "
-        f"FROM orders{' WHERE strategy=?' if scoped else ''} ORDER BY created_at DESC LIMIT 300",
+        "SELECT trade_date,submitted_at,code,name,side,quantity,requested_price,fill_price,status,order_type,strategy,error "
+        f"FROM orders{' WHERE strategy=?' if scoped else ''} ORDER BY submitted_at DESC, created_at DESC LIMIT 300",
         (order_filter,) if scoped else (),
     )), width="stretch", hide_index=True)
     st.subheader("成交记录")

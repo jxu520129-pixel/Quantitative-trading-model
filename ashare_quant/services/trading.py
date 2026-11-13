@@ -13,8 +13,8 @@ from ..config import Settings
 from ..data.providers import spot_prices
 from ..data.service import DataService
 from ..database import Database
-from ..market_rules import round_to_lot
-from ..models import OrderRequest, OrderSide, Signal, intraday_fill_time
+from ..market_rules import at_limit, board_price_limit, round_to_lot
+from ..models import OrderRequest, OrderSide, Signal, ORDER_TYPE_LIMIT_UP_QUEUE, intraday_fill_time
 from ..notifications import NotificationHub
 from ..utils import normalize_date, today_text
 
@@ -141,7 +141,8 @@ class TradingService:
         **实时行情不可用时直接返回、不做任何成交**：宁可当天不出手，也不拿陈旧价格成交。
         """
         trade_date = normalize_date(trade_date or today_text())
-        outcome = {"buy_filled": 0, "buy_rejected": 0, "sell_filled": 0, "sell_rejected": 0,
+        outcome = {"buy_filled": 0, "buy_queued": 0, "buy_rejected": 0,
+                   "sell_filled": 0, "sell_rejected": 0,
                    "failed": 0, "skipped": 0}
         prices = {
             code: price
@@ -165,9 +166,16 @@ class TradingService:
             order_id = self._submit_buy(pick, prices[pick["code"]], trade_date)
             if order_id:
                 submitted.append(("BUY", order_id, None))
-        if not submitted:
-            return outcome
+        submitted_ids = {order_id for _, order_id, _ in submitted}
+        # 撮合前已存在的涨停排单（含本次新挂的），用于统计「涨停打开后成交」
+        queued_before = {
+            row["id"] for row in self.database.query_all(
+                "SELECT id FROM orders WHERE status='PENDING' AND order_type=? AND trade_date<=?",
+                (ORDER_TYPE_LIMIT_UP_QUEUE, trade_date),
+            )
+        }
 
+        # 即使本次无新委托，也要撮合历史 PENDING（涨停排单可能在此盘中时点涨停打开）
         self.broker.execute_pending_orders(
             trade_date, price_overrides=prices, filled_at=intraday_fill_time(trade_date),
         )
@@ -179,6 +187,9 @@ class TradingService:
                 outcome["sell_filled" if side == "SELL" else "buy_filled"] += 1
             elif status == "FAILED":
                 outcome["failed"] += 1
+            elif status == "PENDING" and side == "BUY":
+                # 涨停排单：仍封板，继续排队（不计数为被拒）
+                outcome["buy_queued"] += 1
             else:
                 outcome["sell_rejected" if side == "SELL" else "buy_rejected"] += 1
             if exit_signal is not None:
@@ -186,7 +197,31 @@ class TradingService:
             if status != "FILLED":
                 LOG.info("盘中%s未成交（%s）：%s", "卖出" if side == "SELL" else "买入", order_id,
                          str(row["error"]) if row else "")
+        # 历史涨停排单（非本次新提交）涨停打开后成交，也要计入买入成交
+        for order_id in queued_before - submitted_ids:
+            row = self.database.query_one("SELECT status FROM orders WHERE id=?", (order_id,))
+            if row and row["status"] == "FILLED":
+                outcome["buy_filled"] += 1
         return outcome
+
+    def cancel_limit_up_queues(self, trade_date: str | None = None) -> int:
+        """收盘时把当日仍未成交的涨停排单自动撤单，返回撤单笔数。
+
+        涨停排单若一整天都没打开（一直封板），收盘前必须撤掉，否则委托会永远
+        挂 PENDING、跨日也不该继续排（价格基准已变）。由盘后 15:30 流程调用。
+        """
+        trade_date = normalize_date(trade_date or today_text())
+        rows = self.database.query_all(
+            "SELECT id, code FROM orders WHERE status='PENDING' AND order_type=? AND trade_date=?",
+            (ORDER_TYPE_LIMIT_UP_QUEUE, trade_date),
+        )
+        for row in rows:
+            self.broker.cancel_order(row["id"])
+            self.database.execute(
+                "UPDATE orders SET error='涨停未打开，收盘自动撤单' WHERE id=?", (row["id"],)
+            )
+            LOG.info("收盘撤单 %s：涨停排单未成交，自动撤销", row["code"])
+        return len(rows)
 
     def _submit_exit(self, signal: Signal, prices: dict[str, float],
                      positions: dict[str, Any], trade_date: str) -> str:
@@ -206,7 +241,11 @@ class TradingService:
         ))
 
     def _submit_buy(self, pick: dict[str, Any], price: float, trade_date: str) -> str:
-        """按目标权重提交一笔买入委托（单票不超风险上限，与既有调仓口径一致）。"""
+        """按目标权重提交一笔买入委托（单票不超风险上限，与既有调仓口径一致）。
+
+        若实时价已到涨停价 → **涨停排单**：挂涨停价买单排队，等后续盘中时点涨停
+        打开（实时价 < 涨停价）再按实时价成交，收盘仍未成交则自动撤单。
+        """
         account = self.broker.get_account()
         max_positions = max(1, int(self.settings.risk["max_positions"]))
         target_weight = min(
@@ -226,11 +265,38 @@ class TradingService:
                 pick["code"], account.cash, target_weight * 100, price,
             )
             return ""
+        pre_close = self._pre_close(pick["code"], trade_date)
+        if at_limit(price, pre_close, pick["code"], "BUY"):
+            limit_pct = board_price_limit(pick["code"], is_st=False)
+            limit_price = round(pre_close * (1 + limit_pct), 2)
+            LOG.info("涨停排单 %s：实时价 %.2f 已封涨停（昨收 %.2f），挂涨停价 %.2f 排队",
+                     pick["code"], price, pre_close, limit_price)
+            return self.broker.submit_order(OrderRequest(
+                code=pick["code"], name=pick["name"], side=OrderSide.BUY, quantity=quantity,
+                strategy=pick["strategy"], trade_date=trade_date,
+                requested_price=limit_price, reason=f"涨停排单（{pick['reason']}）",
+                order_type=ORDER_TYPE_LIMIT_UP_QUEUE,
+            ))
         return self.broker.submit_order(OrderRequest(
             code=pick["code"], name=pick["name"], side=OrderSide.BUY, quantity=quantity,
             strategy=pick["strategy"], trade_date=trade_date,
             requested_price=price, reason=pick["reason"],
         ))
+
+    def _pre_close(self, code: str, trade_date: str) -> float | None:
+        """取昨收价：优先当日实时行情，其次当日日线，都没有则返回 None。"""
+        row = self.database.query_one(
+            "SELECT pre_close FROM market_quotes WHERE code=? AND substr(quote_time,1,10)=?",
+            (code, trade_date),
+        )
+        if row and row["pre_close"]:
+            return float(row["pre_close"])
+        row = self.database.query_one(
+            "SELECT pre_close FROM daily_bars WHERE code=? AND trade_date=?", (code, trade_date)
+        )
+        if row and row["pre_close"]:
+            return float(row["pre_close"])
+        return None
 
     def _pick_buys(self, candidates: list[dict[str, Any]] | None, prices: dict[str, float],
                    positions: dict[str, Any], trade_date: str) -> list[dict[str, Any]]:
