@@ -20,7 +20,7 @@ if ($Mode -eq "Scheduler") {
     # 盘中 intraday-trade 是**买点的唯一入口**（实时价当天成交），少了它就不会有任何买入。
     $jobs = @(
         @{ Name = "A股量化交易-开盘前结算"; Time = "09:26"; Command = "execute-orders"; Description = "T+1 解锁可卖数量与风控日内状态重置" },
-        @{ Name = "A股量化交易-盘中即时交易-0935"; Time = "09:35"; Command = "intraday-trade"; Description = "盘中实时价即时买卖" },
+        @{ Name = "A股量化交易-盘中即时交易-0938"; Time = "09:38"; Command = "intraday-trade"; Description = "盘中实时价即时买卖" },
         @{ Name = "A股量化交易-盘中即时交易-1000"; Time = "10:00"; Command = "intraday-trade"; Description = "盘中实时价即时买卖" },
         @{ Name = "A股量化交易-盘中即时交易-1030"; Time = "10:30"; Command = "intraday-trade"; Description = "盘中实时价即时买卖" },
         @{ Name = "A股量化交易-盘中即时交易-1430"; Time = "14:30"; Command = "intraday-trade"; Description = "盘中实时价即时买卖" },
