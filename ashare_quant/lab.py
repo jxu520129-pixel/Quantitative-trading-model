@@ -138,15 +138,16 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]
     # 名称与 hot_strategy.HOT_STRATEGY_NAME 保持一致；entry_json 带 engine=hot_score，
     # 因子条件扫描会自动跳过，回测与运行由 ③/打分引擎按引擎标记分派。
     "箱体突破·放量确认": (
-        "收盘突破前4日高点 + 量比>2 + 站上20日线 + 箱体振幅<15%；移动止损12%/止盈30%（全A股回测年化18.5%）",
+        "收盘突破前4日高点 + 量比>1.5 + 站上20日线 + 箱体振幅<15%；移动止损18%/止盈30%"
+        "（2026-11 参数优化：vol_ratio 2.0→1.5、移动止损 12%→18%，长区间回撤 37.6%→20.7%、年化 8.0%→12.2%）",
         {"combine": "AND", "conditions": [
             {"factor": "breakout_4", "op": ">", "value": 0.005},
-            {"factor": "vol_ratio", "op": ">", "value": 2.0},
+            {"factor": "vol_ratio", "op": ">", "value": 1.5},
             {"factor": "ma20_dev", "op": ">", "value": 0.0},
             {"factor": "box_range_5", "op": "<", "value": 0.15},
         ]},
         {"combine": "OR", "conditions": [],
-         "stop_loss_pct": 0.0, "take_profit_pct": 0.30, "trailing_stop_pct": 0.12, "breakout_exit": False},
+         "stop_loss_pct": 0.0, "take_profit_pct": 0.30, "trailing_stop_pct": 0.18, "breakout_exit": False},
     ),
     "超跌反弹·量比确认": (
         "超跌反弹 + 量比>1.2（放量确认，回撤更低至约13%）；止损6%/止盈15%",
