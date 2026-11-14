@@ -244,6 +244,60 @@ def test_builtin_factors_all_evaluate():
         assert isinstance(series, pd.Series) and len(series) == len(frame), f"{name} 求值失败"
 
 
+# 公式因子名 -> 计算因子库（factors.py）名，两套库应口径一致
+_FORMULA_TO_COMPUTE = {
+    "kdj_j": "kdj", "cci": "cci", "williams_r": "williams_r", "boll_pctb": "boll_pctb",
+    "boll_width": "boll_width", "bias_5": "bias", "momentum_60_20": "momentum_skip",
+    "obv_slope": "obv_slope", "mfi": "mfi", "amount_ratio": "amount_ratio",
+    "vol_stability": "vol_stability", "sharpe_60": "sharpe", "downside_vol": "downside_vol",
+    "range_position": "range_position", "updown_ratio": "updown_ratio",
+}
+
+
+def test_new_factors_match_reference():
+    """新增因子：公式求值与手算一致，且公式库与计算库（factors.py）口径一致。"""
+    from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, evaluate_factor
+    from ashare_quant.strategies.factors import compute_factor
+
+    rng = np.random.default_rng(7)
+    dates = pd.bdate_range("2024-01-01", periods=300)
+    closes = 10 * np.exp(np.cumsum(rng.normal(0.0002, 0.02, len(dates))))
+    frame = pd.DataFrame({
+        "open": closes * (1 + rng.normal(0, 0.003, len(dates))),
+        "high": closes * 1.01, "low": closes * 0.99, "close": closes,
+        "volume": rng.integers(1e6, 2e7, len(dates)).astype(float),
+        "amount": rng.integers(2e7, 5e8, len(dates)).astype(float),
+        "pre_close": np.concatenate(([10.0], closes[:-1])),
+    })
+    close, high, low, vol = frame["close"].astype(float), frame["high"].astype(float), frame["low"].astype(float), frame["volume"].astype(float)
+
+    rsv = (close - low.rolling(9).min()) / (high.rolling(9).max() - low.rolling(9).min()) * 100
+    kline, dline = rsv.rolling(3).mean(), rsv.rolling(3).mean().rolling(3).mean()
+    pos_flow = (close.diff().clip(lower=0) * vol).rolling(14).sum()
+    neg_flow = ((-close.diff()).clip(lower=0) * vol).rolling(14).sum()
+    sign = (close.diff() > 0).astype(float) - (close.diff() < 0).astype(float)
+    obv = (sign * vol).cumsum()
+
+    references = {
+        "kdj_j": (3 * kline - 2 * dline).iloc[-1],
+        "williams_r": ((close - high.rolling(14).max()) / (high.rolling(14).max() - low.rolling(14).min()) * 100).iloc[-1],
+        "range_position": ((close - low.rolling(20).min()) / (high.rolling(20).max() - low.rolling(20).min())).iloc[-1],
+        "mfi": (100 - 100 / (1 + pos_flow / neg_flow)).iloc[-1],
+        "obv_slope": (obv.diff(20) / (20 * vol.rolling(20).mean())).iloc[-1],
+        "boll_pctb": ((close - close.rolling(20).mean()) / (2 * close.rolling(20).std())).iloc[-1],
+    }
+    for name, ref in references.items():
+        got = evaluate_factor(BUILTIN_FACTOR_FORMULAS[name][1], frame).iloc[-1]
+        assert abs(ref - got) < 1e-6, f"{name} 手算 {ref} != 公式 {got}"
+
+    # 两套因子库口径一致
+    for formula_name, compute_name in _FORMULA_TO_COMPUTE.items():
+        a = evaluate_factor(BUILTIN_FACTOR_FORMULAS[formula_name][1], frame).iloc[-1]
+        b = compute_factor(compute_name, frame)
+        assert b is not None and np.isfinite(b) and abs(a - b) < 1e-6, f"{formula_name}/{compute_name} 两套库不一致"
+
+
+
 def test_filter_candidates_by_quality():
     from ashare_quant.lab import filter_candidates_by_quality
 

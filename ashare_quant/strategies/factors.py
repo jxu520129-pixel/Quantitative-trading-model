@@ -124,6 +124,186 @@ def _amihud(frame: pd.DataFrame, window: int = 20) -> float | None:
     return float(ratio.tail(window).mean())
 
 
+# ── 振荡器 / 超买超卖 ──
+def _kdj(frame: pd.DataFrame, n: int = 9, k: int = 3, d: int = 3) -> float | None:
+    """KDJ 的 J 值 = 3K−2D，超买偏高（>100）、超卖偏低（<0）。"""
+    if len(frame) < n + max(k, d):
+        return None
+    close = frame["close"].astype(float)
+    low_min = frame["low"].astype(float).rolling(n).min()
+    high_max = frame["high"].astype(float).rolling(n).max()
+    denom = high_max - low_min
+    rsv = (close - low_min) / denom.replace(0.0, np.nan) * 100.0
+    k_line = rsv.rolling(k).mean()
+    d_line = k_line.rolling(d).mean()
+    last = 3.0 * float(k_line.iloc[-1]) - 2.0 * float(d_line.iloc[-1])
+    return last if math.isfinite(last) else None
+
+
+def _cci(frame: pd.DataFrame, window: int = 14) -> float | None:
+    """CCI 顺势指标：典型价格对均值偏差 / 平均绝对偏差（0.015 缩放）。"""
+    if len(frame) < window + 1:
+        return None
+    tp = (frame["high"].astype(float) + frame["low"].astype(float) + frame["close"].astype(float)) / 3.0
+    tp_ma = tp.rolling(window).mean()
+    mad = (tp - tp_ma).abs().rolling(window).mean()
+    last_mad = float(mad.iloc[-1])
+    if last_mad == 0:
+        return None
+    return (float(tp.iloc[-1]) - float(tp_ma.iloc[-1])) / (0.015 * last_mad)
+
+
+def _williams_r(frame: pd.DataFrame, window: int = 14) -> float | None:
+    """威廉指标 WR：-100~0，接近 0 超买、接近 -100 超卖。"""
+    if len(frame) < window:
+        return None
+    high_max = float(frame["high"].astype(float).rolling(window).max().iloc[-1])
+    low_min = float(frame["low"].astype(float).rolling(window).min().iloc[-1])
+    if high_max == low_min:
+        return None
+    return (float(frame["close"].iloc[-1]) - high_max) / (high_max - low_min) * 100.0
+
+
+def _boll_pctb(frame: pd.DataFrame, window: int = 20, k: float = 2.0) -> float | None:
+    """布林带 %B 位置：0~1（>1 在上轨上方、<0 在下轨下方）。"""
+    if len(frame) < window:
+        return None
+    close = frame["close"].astype(float)
+    ma = close.rolling(window).mean()
+    std = close.rolling(window).std()
+    last_std = float(std.iloc[-1])
+    if last_std == 0:
+        return None
+    return (float(close.iloc[-1]) - float(ma.iloc[-1])) / (k * last_std)
+
+
+def _boll_width(frame: pd.DataFrame, window: int = 20, k: float = 2.0) -> float | None:
+    """布林带宽 = 2k·σ/中轨（越低=压缩越紧，常为变盘前兆）。"""
+    if len(frame) < window:
+        return None
+    close = frame["close"].astype(float)
+    ma = float(close.rolling(window).mean().iloc[-1])
+    if ma == 0:
+        return None
+    return (2.0 * k * float(close.rolling(window).std().iloc[-1])) / ma
+
+
+# ── 趋势 / 动量 ──
+def _bias(frame: pd.DataFrame, window: int = 5) -> float | None:
+    """乖离率：现价对 window 日均线的偏离（BIAS）。"""
+    if len(frame) < window:
+        return None
+    close = frame["close"].astype(float)
+    ma = float(close.rolling(window).mean().iloc[-1])
+    if ma == 0:
+        return None
+    return float(close.iloc[-1]) / ma - 1.0
+
+
+def _momentum_skip(frame: pd.DataFrame, window: int = 60, skip: int = 20) -> float | None:
+    """动量（剔除近端）：跳过最近 skip 日，取更早 window 日的动量，规避短期反转噪声。"""
+    if len(frame) < window + 1:
+        return None
+    current = float(frame["close"].iloc[-1 - skip])
+    base = float(frame["close"].iloc[-1 - window])
+    if base <= 0:
+        return None
+    return current / base - 1.0
+
+
+# ── 量价配合 ──
+def _obv_slope(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """OBV 净量比：近 window 日净流入量 / 总成交量（−1~1，量价方向确认）。"""
+    if len(frame) < window + 1:
+        return None
+    close = frame["close"].astype(float)
+    volume = frame["volume"].astype(float)
+    sign = (close.diff() > 0).astype(float) - (close.diff() < 0).astype(float)
+    obv = (sign * volume).cumsum()
+    avg_vol = float(volume.rolling(window).mean().iloc[-1])
+    if avg_vol == 0:
+        return None
+    return float(obv.diff(window).iloc[-1]) / (window * avg_vol)
+
+
+def _mfi(frame: pd.DataFrame, window: int = 14) -> float | None:
+    """资金流量指标 MFI：正/负资金流之比的 0~100 映射，量价共振。"""
+    if len(frame) < window + 1:
+        return None
+    close = frame["close"].astype(float)
+    volume = frame["volume"].astype(float)
+    pos = (close.diff().clip(lower=0) * volume).rolling(window).sum()
+    neg = ((-close.diff()).clip(lower=0) * volume).rolling(window).sum()
+    last_pos, last_neg = float(pos.iloc[-1]), float(neg.iloc[-1])
+    if last_neg == 0:
+        return 100.0 if last_pos > 0 else 50.0
+    return 100.0 - 100.0 / (1.0 + last_pos / last_neg)
+
+
+def _amount_ratio(frame: pd.DataFrame, window: int = 5) -> float | None:
+    """成交额比：当日成交额 / 近 window 日均额（比量比更稳健的资金活跃代理）。"""
+    if len(frame) < window:
+        return None
+    amount = frame["amount"].astype(float)
+    ma = float(amount.rolling(window).mean().iloc[-1])
+    if ma == 0:
+        return None
+    return float(amount.iloc[-1]) / ma
+
+
+def _vol_stability(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """量稳度：近 window 日成交量变异系数（越低量能越稳，对应「量稳换手率」因子思路）。"""
+    if len(frame) < window:
+        return None
+    volume = frame["volume"].astype(float)
+    ma = float(volume.rolling(window).mean().iloc[-1])
+    if ma == 0:
+        return None
+    return float(volume.rolling(window).std().iloc[-1]) / ma
+
+
+# ── 风险调整 / 区间位置 ──
+def _sharpe(frame: pd.DataFrame, window: int = 60) -> float | None:
+    """风险调整动量：近 window 日收益均值 / 标准差（夏普代理）。"""
+    if len(frame) < window + 1:
+        return None
+    returns = frame["close"].astype(float).pct_change()
+    std = float(returns.rolling(window).std().iloc[-1])
+    if std == 0:
+        return None
+    return float(returns.rolling(window).mean().iloc[-1]) / std
+
+
+def _downside_vol(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """下行波动率：只对下跌收益取标准差（Sortino 式，越低越好）。"""
+    if len(frame) < window + 1:
+        return None
+    downside = frame["close"].astype(float).pct_change().clip(upper=0)
+    return float(downside.rolling(window).std().iloc[-1])
+
+
+def _range_position(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """区间价格位置：现价在近 window 日高低区间中的相对位置（0~1）。"""
+    if len(frame) < window:
+        return None
+    high_max = float(frame["high"].astype(float).rolling(window).max().iloc[-1])
+    low_min = float(frame["low"].astype(float).rolling(window).min().iloc[-1])
+    if high_max == low_min:
+        return None
+    return (float(frame["close"].iloc[-1]) - low_min) / (high_max - low_min)
+
+
+def _updown_ratio(frame: pd.DataFrame, window: int = 20) -> float | None:
+    """上涨力量占比：近 window 日上涨幅度合计 / 涨跌幅度合计（0~1）。"""
+    if len(frame) < window + 1:
+        return None
+    diff = frame["close"].astype(float).diff()
+    total = float(diff.abs().rolling(window).sum().iloc[-1])
+    if total == 0:
+        return None
+    return float(diff.clip(lower=0).rolling(window).sum().iloc[-1]) / total
+
+
 FACTORS: dict[str, dict[str, Any]] = {
     "momentum": {"func": _momentum, "label": "动量", "defaults": {"window": 60}},
     "reversal": {"func": _reversal, "label": "短期反转", "defaults": {"window": 5}},
@@ -135,6 +315,21 @@ FACTORS: dict[str, dict[str, Any]] = {
     "high_52w": {"func": _high_52w, "label": "52周新高", "defaults": {"window": 250}},
     "atr": {"func": _atr, "label": "真实波幅", "defaults": {"window": 14}},
     "amihud": {"func": _amihud, "label": "非流动性", "defaults": {"window": 20}},
+    "kdj": {"func": _kdj, "label": "KDJ·J值", "defaults": {"n": 9, "k": 3, "d": 3}},
+    "cci": {"func": _cci, "label": "CCI", "defaults": {"window": 14}},
+    "williams_r": {"func": _williams_r, "label": "威廉WR", "defaults": {"window": 14}},
+    "boll_pctb": {"func": _boll_pctb, "label": "布林%B", "defaults": {"window": 20, "k": 2.0}},
+    "boll_width": {"func": _boll_width, "label": "布林带宽", "defaults": {"window": 20, "k": 2.0}},
+    "bias": {"func": _bias, "label": "乖离率", "defaults": {"window": 5}},
+    "momentum_skip": {"func": _momentum_skip, "label": "动量(剔近端)", "defaults": {"window": 60, "skip": 20}},
+    "obv_slope": {"func": _obv_slope, "label": "OBV净量比", "defaults": {"window": 20}},
+    "mfi": {"func": _mfi, "label": "资金流量MFI", "defaults": {"window": 14}},
+    "amount_ratio": {"func": _amount_ratio, "label": "成交额比", "defaults": {"window": 5}},
+    "vol_stability": {"func": _vol_stability, "label": "量稳度", "defaults": {"window": 20}},
+    "sharpe": {"func": _sharpe, "label": "风险调整动量", "defaults": {"window": 60}},
+    "downside_vol": {"func": _downside_vol, "label": "下行波动", "defaults": {"window": 20}},
+    "range_position": {"func": _range_position, "label": "区间位置", "defaults": {"window": 20}},
+    "updown_ratio": {"func": _updown_ratio, "label": "上涨力量", "defaults": {"window": 20}},
 }
 
 

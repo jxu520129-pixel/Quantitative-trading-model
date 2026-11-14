@@ -72,6 +72,63 @@ BUILTIN_FACTOR_FORMULAS: dict[str, tuple[str, str]] = {
     "morning_star": ("早晨之星近似", "(close-open)/close-(close.shift(1)-open.shift(1))/close.shift(1)"),
     "breakout_20": ("突破前20日高点", "close/high.shift(1).rolling(20).max()-1"),
     "breakout_60": ("突破前60日高点", "close/high.shift(1).rolling(60).max()-1"),
+    # ── 振荡器 / 超买超卖（均值回归，A 股短线最常用）──
+    "kdj_j": (
+        "KDJ·J值(9,3,3)",
+        "3*((close-low.rolling(9).min())/(high.rolling(9).max()-low.rolling(9).min())*100).rolling(3).mean()"
+        "-2*((close-low.rolling(9).min())/(high.rolling(9).max()-low.rolling(9).min())*100)"
+        ".rolling(3).mean().rolling(3).mean()",
+    ),
+    "cci": (
+        "CCI(14)顺势指标",
+        "((high+low+close)/3-(high+low+close).rolling(14).mean()/3)"
+        "/(0.015*(((high+low+close)/3-(high+low+close).rolling(14).mean()/3).abs().rolling(14).mean()))",
+    ),
+    "williams_r": (
+        "威廉指标WR(14)",
+        "(close-high.rolling(14).max())/(high.rolling(14).max()-low.rolling(14).min())*100",
+    ),
+    "boll_pctb": (
+        "布林带%B位置",
+        "(close-close.rolling(20).mean())/(2*close.rolling(20).std())",
+    ),
+    # ── 趋势 / 动量 ──
+    "boll_width": ("布林带宽(变盘前兆)", "(4*close.rolling(20).std())/close.rolling(20).mean()"),
+    "bias_5": ("5日乖离率", "close/close.rolling(5).mean()-1"),
+    "momentum_60_20": (
+        "动量(剔除近20日)",
+        "close.shift(20)/close.shift(60)-1",
+    ),
+    # ── 量价配合 ──
+    "obv_slope": (
+        "OBV净量比(20)",
+        "(((close.diff()>0).astype(float)-(close.diff()<0).astype(float))*volume).cumsum().diff(20)"
+        "/(20*volume.rolling(20).mean())",
+    ),
+    "mfi": (
+        "资金流量指标MFI(14)",
+        "100-100/(1+(close.diff().clip(lower=0)*volume).rolling(14).sum()"
+        "/((-close.diff()).clip(lower=0)*volume).rolling(14).sum())",
+    ),
+    "amount_ratio": ("成交额比(5日)", "amount/amount.rolling(5).mean()"),
+    "vol_stability": (
+        "量稳度(越低越稳)",
+        "volume.rolling(20).std()/volume.rolling(20).mean()",
+    ),
+    # ── 风险调整 / 区间位置 ──
+    "sharpe_60": (
+        "风险调整动量(夏普)",
+        "close.pct_change().rolling(60).mean()/close.pct_change().rolling(60).std()",
+    ),
+    "downside_vol": ("下行波动率(20)", "close.pct_change().clip(upper=0).rolling(20).std()"),
+    "range_position": (
+        "区间价格位置(20)",
+        "(close-low.rolling(20).min())/(high.rolling(20).max()-low.rolling(20).min())",
+    ),
+    "updown_ratio": (
+        "上涨力量占比(20)",
+        "close.diff().clip(lower=0).rolling(20).sum()/close.diff().abs().rolling(20).sum()",
+    ),
 }
 
 
@@ -127,6 +184,29 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]
         {"engine": "limit_pullback_score", "threshold": 70, "conditions": [],
          "description": "涨停回马枪形态引擎，代码在 ashare_quant/limit_pullback_strategy.py"},
         {"combine": "OR", "conditions": []},
+    ),
+    # ── 新因子示例模板（2026-11 新增因子，绩效待回测验证，导入后可自行调参）──
+    "布林带收口·放量突破": (
+        "布林带宽收窄(<8%，变盘前兆) + 收盘突破前4日高点 + 量比>1.5 + 站上20日线；移动止损10%/止盈20%",
+        {"combine": "AND", "conditions": [
+            {"factor": "boll_width", "op": "<", "value": 0.08},
+            {"factor": "breakout_4", "op": ">", "value": 0.005},
+            {"factor": "vol_ratio", "op": ">", "value": 1.5},
+            {"factor": "ma20_dev", "op": ">", "value": 0.0},
+        ]},
+        {"combine": "OR", "conditions": [],
+         "stop_loss_pct": 0.0, "take_profit_pct": 0.20, "trailing_stop_pct": 0.10, "breakout_exit": False},
+    ),
+    "超卖反转·KDJ回升": (
+        "KDJ·J值超卖(<0) + 上涨力量占比>0.5 + 距20日低点<15% + 站上5日线；止损6%/止盈15%",
+        {"combine": "AND", "conditions": [
+            {"factor": "kdj_j", "op": "<", "value": 0.0},
+            {"factor": "updown_ratio", "op": ">", "value": 0.5},
+            {"factor": "near_low_20", "op": "<", "value": 0.15},
+            {"factor": "bias_5", "op": ">", "value": 0.0},
+        ]},
+        {"combine": "OR", "conditions": [],
+         "stop_loss_pct": 0.06, "take_profit_pct": 0.15, "trailing_stop_pct": 0.0, "breakout_exit": False},
     ),
 }
 
@@ -186,7 +266,7 @@ def evaluate_exit(
 
 _FACTOR_COLUMNS = {"open", "high", "low", "close", "volume", "amount", "pre_close"}
 _FACTOR_FUNCTIONS = {"abs", "min", "max", "round", "sum", "float", "int", "bool"}
-_FACTOR_METHODS = {"shift", "pct_change", "rolling", "std", "mean", "diff", "clip", "ewm", "min", "max", "abs", "astype"}
+_FACTOR_METHODS = {"shift", "pct_change", "rolling", "std", "mean", "diff", "clip", "ewm", "min", "max", "abs", "astype", "sum", "cumsum"}
 _BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
 _UNARY_OPS = (ast.UAdd, ast.USub)
 _COMPARE_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
@@ -612,6 +692,11 @@ FACTOR_LABELS = {
     "up_days_5": "5日连涨天数", "v_recovery": "深V回收",
     "rally_3": "三日涨跌幅", "gap_up": "集合竞价高开", "morning_star": "早晨之星",
     "breakout_20": "突破前20日高点", "breakout_60": "突破前60日高点", "ma_trend": "均线多头度",
+    "kdj_j": "KDJ·J值", "cci": "CCI(14)", "williams_r": "威廉WR(14)", "boll_pctb": "布林%B",
+    "boll_width": "布林带宽", "bias_5": "5日乖离", "momentum_60_20": "动量(剔近端)",
+    "obv_slope": "OBV净量比", "mfi": "资金流量MFI", "amount_ratio": "成交额比",
+    "vol_stability": "量稳度", "sharpe_60": "风险调整动量", "downside_vol": "下行波动",
+    "range_position": "区间位置", "updown_ratio": "上涨力量",
 }
 
 
