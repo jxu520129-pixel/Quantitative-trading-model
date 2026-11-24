@@ -64,19 +64,17 @@
 │   ├── brokers/                    # 模拟券商与实盘适配边界（paper/qmt/ptrade/easytrader）
 │   ├── data/                       # AkShare/Tushare 数据源、缓存、演示数据
 │   ├── services/                   # 信号、交易编排、运行时与控制开关
-│   ├── strategies/                 # 因子库与各策略（动量/双均线/多因子等）
+│   ├── strategies/                 # 所有策略（因子策略 + 因子实验室 + 短线/回马枪/主升浪）
 │   ├── ai_analyst.py               # AI 智能分析（自然语言问股，大模型生成技术面分析）
 │   ├── backtest.py                 # Backtrader A 股回测
 │   ├── cli.py                      # 命令行入口
 │   ├── config.py                   # YAML 与环境变量配置
 │   ├── database.py                 # SQLite 表结构与访问层
 │   ├── event_similarity.py         # 事件相似度检索与历史表现回溯
+│   ├── factors.py                  # 技术面因子计算库（截面打分，回测/ML 模型共用）
 │   ├── fundamental.py              # 事件库与宏观指标采集（关键词打分，可选 LLM）
-│   ├── hot_strategy.py             # 短线人气·热度共振（四维共振打分，日线近似回测）
 │   ├── industry_chain.py           # 产业链关键词图谱（上下游）
 │   ├── lab.py                      # 因子实验室与盘中买点扫描引擎
-│   ├── limit_pullback_strategy.py  # 涨停回马枪·冲高回调低吸（日线近似回测）
-│   ├── main_rally.py               # 主升浪策略（事件×宏观×产业链×盈利×技术）
 │   ├── market_rules.py             # 费用、整手、涨跌停规则
 │   ├── ml_model.py                 # 主升概率模型（GBDT 基线 + 重训管线）
 │   ├── models.py                   # 数据模型（dataclass）
@@ -226,7 +224,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 
 ## 技术面因子与策略
 
-系统内置可复用的技术面因子库（`ashare_quant/strategies/factors.py`），全部基于日线 OHLCV 计算，实盘信号与回测共用同一套打分逻辑。因子原始值在横截面 z-score 后由策略按带符号权重合成（正=越高越好，负=越低越好）。
+系统内置可复用的技术面因子库（`ashare_quant/factors.py`），全部基于日线 OHLCV 计算，实盘信号与回测共用同一套打分逻辑。因子原始值在横截面 z-score 后由策略按带符号权重合成（正=越高越好，负=越低越好）。
 
 内置策略（参数在 `config/default.yaml` 的 `strategies` 下调整，看板侧边栏 / CLI `--strategy` 可切换）：
 
@@ -246,7 +244,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 
 ### 内置因子清单
 
-看板「因子实验室 → 内置因子」可直接选用（`ashare_quant/lab.py` 的 `BUILTIN_FACTOR_FORMULAS`），`strategies/factors.py` 里另有一套同名计算因子库供回测策略与 ML 模型复用，两者口径一致（由 `tests/test_core.py::test_new_factors_match_reference` 锁定）。
+看板「因子实验室 → 内置因子」可直接选用（`ashare_quant/lab.py` 的 `BUILTIN_FACTOR_FORMULAS`），`factors.py` 里另有一套同名计算因子库供回测策略与 ML 模型复用，两者口径一致（由 `tests/test_core.py::test_new_factors_match_reference` 锁定）。
 
 | 类别 | 因子 | 说明 |
 |---|---|---|
@@ -357,7 +355,7 @@ python scripts/optimize_strategies.py --apply    # 写入 signal_strategies 表
 
 ## 短线情绪策略（人气热度共振 × 涨停回马枪）
 
-系统内置两个短线情绪/形态策略，均为**日线近似回测**（盘中的人气榜、封板时间、炸板次数、换手率等无法历史回填，按日线近似）。核心实现分别在 `ashare_quant/hot_strategy.py` 与 `ashare_quant/limit_pullback_strategy.py`，策略设计要点已并入下方两个小节。
+系统内置两个短线情绪/形态策略，均为**日线近似回测**（盘中的人气榜、封板时间、炸板次数、换手率等无法历史回填，按日线近似）。核心实现分别在 `ashare_quant/strategies/hot_strategy.py` 与 `ashare_quant/strategies/limit_pullback_strategy.py`，策略设计要点已并入下方两个小节。
 
 ### 短线人气·热度共振
 
@@ -413,7 +411,7 @@ python scripts/optimize_strategies.py           # 按市场风格优化策略参
 ### 因子实验室
 
 - **自建/导入因子**：用 pandas 公式定义因子，如 `close/close.shift(5)-1`，可用 `open/high/low/close/volume/amount/pre_close` 列和 `shift/rolling/pct_change/ewm/diff/clip` 等方法；内置 24 个示例因子可一键导入（含箱体突破 `breakout_4`/`box_range_4`、量比 `vol_ratio`、均线偏离 `ma20_dev`/`ma60_dev` 等）。公式在 AST 白名单内求值，仅允许上述列与方法，不执行任意 Python 代码（不支持 `np`）。
-- **策略定义**：买入/离场条件用「因子 + 运算符 + 阈值」组合（AND/OR），可选固定止损/止盈、移动止损、跌破箱体高点离场；内置 3 个因子策略模板（箱体突破·放量确认 / 超跌反弹·量比确认 / 主升浪·启动突破）可一键导入，另有 2 个短线情绪策略引擎（`engine=hot_score` 人气热度共振 / `engine=limit_pullback_score` 涨停回马枪）直接走 `hot_strategy.py` / `limit_pullback_strategy.py` 回测。
+- **策略定义**：买入/离场条件用「因子 + 运算符 + 阈值」组合（AND/OR），可选固定止损/止盈、移动止损、跌破箱体高点离场；内置 3 个因子策略模板（箱体突破·放量确认 / 超跌反弹·量比确认 / 主升浪·启动突破）可一键导入，另有 2 个短线情绪策略引擎（`engine=hot_score` 人气热度共振 / `engine=limit_pullback_score` 涨停回马枪）直接走 `strategies/hot_strategy.py` / `strategies/limit_pullback_strategy.py` 回测。
 - **信号回测**：选历史时间段跑多标的逐日回测（第 T 日信号、第 T+1 日开盘成交，无未来函数），含手续费/T+1，输出收益、回撤、胜率、资金曲线与逐笔交易，并写入 SQLite。支持「总仓位比例」控制暴露、压降回撤。
 
 回测引擎（`ashare_quant/lab.py::run_signal_backtest`）做了两项向量化优化，用于消除全市场回测的 O(交易日数 × 股票数) 瓶颈：① **逐日循环向量化**——预构建 `entry_by_day`（日期 → 当日有入场信号的股票列表），开新仓从「每天遍历全市场 5000+ 只」改为「只遍历当日有信号的股票」，复杂度降到 O(总信号日数)；② **因子宽表计算**——抽 `_compile_factor`（`lru_cache` 缓存 AST 解析结果，避免数千次重复 `ast.parse`）与 `evaluate_factor_wide`（对每列一只股票的宽表做 pandas `shift/rolling` 向量化，一次算出全市场因子），逐股回测时只从因子宽表取列构造入场/离场掩码。实测（500 只 × 500 天）回测 3.9s → 2.2s（提速约 1.8 倍），真实策略信号更稀疏（仅 5–10%）时提速可达 10 倍以上；交易数与逐股计算完全一致（逻辑零改动）。注意停牌股因子存在微小 ffp 语义差异（宽表 `ffill` 后按自然日、逐股按交易日），停牌日不交易、占比 <1%，影响可忽略。
@@ -488,7 +486,7 @@ EMAIL_TO=收件邮箱地址
 
 ### 评分公式与选股门槛（§11）
 
-V1 评分公式（✅，`ashare_quant/main_rally.py` 的 `WEIGHTS`）：
+V1 评分公式（✅，`ashare_quant/strategies/main_rally.py` 的 `WEIGHTS`）：
 
 ```
 主升浪评分 = 0.20×事件分 + 0.15×宏观分 + 0.20×产业链分 + 0.20×盈利分 + 0.25×技术分   （0–100）
@@ -505,7 +503,7 @@ V1 评分公式（✅，`ashare_quant/main_rally.py` 的 `WEIGHTS`）：
 
 | 状态 | 因素 | 落地情况 |
 |---|---|---|
-| ✅ | F16 价格趋势（MA/MACD/RSI/ATR/突破/相对强度） | `strategies/factors.py` + `technical_score` |
+| ✅ | F16 价格趋势（MA/MACD/RSI/ATR/突破/相对强度） | `factors.py` + `technical_score` |
 | 🚧 | F17 成交量与资金行为 | VWAP 偏离 / 量比 / 成交额 z（日线代理，分钟级待做） |
 | 🚧 | F01~F05 事件规模/深度/意外/级别/持续 | 关键词打分（`fundamental.py`），可选 LLM 结构化抽取 |
 | 🚧 | F06 宏观周期 / F07 利率 / F08 美元流动性 | `macro_regime_score`（GDP/M2/CPI 简版） |
@@ -547,7 +545,7 @@ V1 评分公式（✅，`ashare_quant/main_rally.py` 的 `WEIGHTS`）：
 
 ## 主升浪盘前扫描与富文本报告
 
-每日交易日 **09:25**（`scheduler.py` 的 `pre_market_scan`），系统按上文「主升浪策略设计」（§17.2 每日流程、§11.2 选股门槛、§20 输出样例）生成并推送盘前富文本报告。核心实现位于 `ashare_quant/main_rally.py`。
+每日交易日 **09:25**（`scheduler.py` 的 `pre_market_scan`），系统按上文「主升浪策略设计」（§17.2 每日流程、§11.2 选股门槛、§20 输出样例）生成并推送盘前富文本报告。核心实现位于 `ashare_quant/strategies/main_rally.py`。
 
 **报告内容（HTML 富文本邮件 + 纯文本兜底，企业微信发纯文本）**：
 
@@ -568,7 +566,7 @@ V1 评分公式（✅，`ashare_quant/main_rally.py` 的 `WEIGHTS`）：
 6. **潜伏/启动阶段关注（趋势分 < 60，Top 10）**：事件与基本面达标但趋势尚未确认的标的，适合跟踪观察。
 7. **风险提示（命中负面事件，Top 10）**：行业命中减持/处罚/立案等负面事件（`causal_direction=负`）的候选，对应方案「退潮风险」提示。
 
-**评分口径**：`主升浪评分 = 0.20×事件分 + 0.15×宏观分 + 0.20×产业链分 + 0.20×盈利分 + 0.25×技术分`（`main_rally.py` 的 `WEIGHTS`，权重可按样本外回测调整）。主升概率优先由 §10 模型 E 的 GBDT 模型输出（标注「模型」），未训练或特征缺失时回退为评分近似映射（标注「近似」）。
+**评分口径**：`主升浪评分 = 0.20×事件分 + 0.15×宏观分 + 0.20×产业链分 + 0.20×盈利分 + 0.25×技术分`（`strategies/main_rally.py` 的 `WEIGHTS`，权重可按样本外回测调整）。主升概率优先由 §10 模型 E 的 GBDT 模型输出（标注「模型」），未训练或特征缺失时回退为评分近似映射（标注「近似」）。
 
 **推送通道**：与买点扫描共用 SMTP 邮件（HTML 富文本优先、纯文本兜底）和企业微信（纯文本），`.env` 配置方式见上节；未配置时仅写日志，不影响调度。
 

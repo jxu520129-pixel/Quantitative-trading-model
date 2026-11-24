@@ -17,8 +17,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .hot_strategy import HOT_STRATEGY_NAME
-from .limit_pullback_strategy import LIMIT_STRATEGY_NAME
+from .strategies.hot_strategy import HOT_STRATEGY_NAME
+from .strategies.limit_pullback_strategy import LIMIT_STRATEGY_NAME
 from .market_rules import TradingCosts, board_of_code, round_to_lot
 
 

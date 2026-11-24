@@ -49,8 +49,8 @@ def main() -> None:
 
     _load_env()
     from ashare_quant.database import Database
-    from ashare_quant.hot_strategy import run_hot_backtest
-    from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest
+    from ashare_quant.strategies.hot_strategy import run_hot_backtest
+    from ashare_quant.strategies.limit_pullback_strategy import run_limit_pullback_backtest
 
     db_path = Path(args.db)
     if not db_path.exists():

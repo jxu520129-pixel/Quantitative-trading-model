@@ -14,9 +14,9 @@ from typing import Any
 
 import pandas as pd
 
-from .database import Database
-from .event_similarity import format_similarity_section_html, similar_event_review
-from .industry_chain import (
+from ..database import Database
+from ..event_similarity import format_similarity_section_html, similar_event_review
+from ..industry_chain import (
     ALIAS_TO_CODE,
     INDUSTRY_CHAIN,
     TUSHARE_TO_CHAIN,
@@ -24,7 +24,7 @@ from .industry_chain import (
     direct_industries,
     macro_industries,
 )
-from .ml_model import model_info, predict_main_rally_probability
+from ..ml_model import model_info, predict_main_rally_probability
 
 
 LOG = logging.getLogger(__name__)
@@ -200,9 +200,9 @@ def technical_score(factors: dict[str, float]) -> float:
 
 def score_main_rally_candidates(runtime: Any, current_quotes: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """对「主升浪·启动突破」候选打分排序，返回完整评分明细。"""
-    from .lab import fetch_industries, find_buy_candidates
+    from ..lab import fetch_industries, find_buy_candidates
 
-    from .ml_model import feature_vector_from_frame
+    from ..ml_model import feature_vector_from_frame
 
     sc = runtime.settings.raw.get("scan", {})
     max_price = float(sc.get("max_price", 0) or 0) or None

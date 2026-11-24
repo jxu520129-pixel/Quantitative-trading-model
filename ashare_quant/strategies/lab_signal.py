@@ -100,7 +100,7 @@ class LabSignalStrategy(BaseStrategy):
         与条件类 z-score 可比的量纲（约 0~3），正分越高越优先。
         """
         if engine == "limit_pullback_score":
-            from ..limit_pullback_strategy import scan_limit_pullback_signals
+            from .limit_pullback_strategy import scan_limit_pullback_signals
 
             threshold = float(entry.get("threshold", 70.0))
             signals = scan_limit_pullback_signals(self.database)

@@ -170,7 +170,7 @@ class LabCustomStrategy(BaseStrategy):
         """内置引擎类策略（涨停回马枪）的买入信号。"""
         if engine != "limit_pullback_score":
             return []
-        from ..limit_pullback_strategy import scan_limit_pullback_signals
+        from .limit_pullback_strategy import scan_limit_pullback_signals
 
         threshold = float(entry.get("threshold", 70.0))
         names = dict(zip(context.universe["code"], context.universe["name"], strict=False))

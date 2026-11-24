@@ -11,10 +11,10 @@ from typing import Any
 
 from .data.seed import seed_demo_market
 from .fundamental import update_fundamentals
-from .hot_strategy import run_hot_backtest
+from .strategies.hot_strategy import run_hot_backtest
 from .lab import build_buy_report, fetch_scan_quotes
-from .limit_pullback_strategy import run_limit_pullback_backtest
-from .main_rally import generate_main_rally_report, score_main_rally_candidates
+from .strategies.limit_pullback_strategy import run_limit_pullback_backtest
+from .strategies.main_rally import generate_main_rally_report, score_main_rally_candidates
 from .scheduler import after_close, end_of_day, intraday_trade, run_scheduler
 from .presentation import localize_payload
 from .services.runtime import build_runtime
@@ -214,7 +214,7 @@ def main() -> None:
         from . import ml_model
         print_json(ml_model.retrain(runtime.database, runtime.data, runtime.settings))
     elif args.command == "event-effectiveness":
-        from .main_rally import event_effectiveness_report
+        from .strategies.main_rally import event_effectiveness_report
         print_json(event_effectiveness_report(runtime.database, days=args.days, min_events=args.min_events))
     elif args.command == "hot-stocks":
         from .fundamental import core_hot_stocks

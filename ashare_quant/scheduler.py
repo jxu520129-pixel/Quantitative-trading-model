@@ -10,7 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from . import ml_model
 from .fundamental import update_fundamentals
 from .lab import build_buy_report, fetch_scan_quotes, fresh_quotes, scan_buy_candidates
-from .main_rally import generate_daily_events_report, generate_main_rally_report
+from .strategies.main_rally import generate_daily_events_report, generate_main_rally_report
 from .services.runtime import Runtime, build_runtime
 from .utils import normalize_date, today_text
 

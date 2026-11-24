@@ -27,7 +27,7 @@ for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
 import pandas as pd  # noqa: E402
 
 from ashare_quant.database import Database  # noqa: E402
-from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest  # noqa: E402
+from ashare_quant.strategies.limit_pullback_strategy import run_limit_pullback_backtest  # noqa: E402
 from ashare_quant.portfolio import (  # noqa: E402
     apply_market_timing,
     combine_returns,

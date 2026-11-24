@@ -27,8 +27,8 @@ import numpy as np
 import pandas as pd
 
 from .hot_strategy import _limit_streak, _load_panels
-from .market_rules import TradingCosts, board_price_limit
-from .models import utc_now_text
+from ..market_rules import TradingCosts, board_price_limit
+from ..models import utc_now_text
 
 LOG = logging.getLogger(__name__)
 

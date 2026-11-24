@@ -311,7 +311,7 @@ def build_market_context(code: str, name: str, runtime: Any, lookback: int = 130
 def build_industry_context(runtime: Any, code: str) -> str:
     """A1 行业板块：个股所属行业 + 产业链上下游。失败返回降级文案。"""
     try:
-        from .main_rally import get_chain_desc, get_stock_industry
+        from .strategies.main_rally import get_chain_desc, get_stock_industry
 
         industry = get_stock_industry(runtime.database, code)
         if not industry:
@@ -327,7 +327,7 @@ def build_event_context(runtime: Any, industry: str) -> str:
     if not industry:
         return "（无行业信息，跳过事件）"
     try:
-        from .main_rally import get_industry_events
+        from .strategies.main_rally import get_industry_events
 
         events = get_industry_events(runtime.database, industry)
         if not events:
@@ -372,7 +372,7 @@ def build_market_breadth(runtime: Any) -> str:
 def build_fundamental_context(code: str) -> str:
     """A4 财务面：营收/净利润同比增速。复用主升浪策略的 fetch_earnings。"""
     try:
-        from .main_rally import fetch_earnings
+        from .strategies.main_rally import fetch_earnings
 
         revenue_yoy, profit_yoy = fetch_earnings(code)
         if not revenue_yoy and not profit_yoy:
@@ -438,7 +438,7 @@ def build_rich_context(runtime: Any, code: str, name: str, lookback: int = 130) 
 
     industry = ""
     try:
-        from .main_rally import get_stock_industry
+        from .strategies.main_rally import get_stock_industry
 
         industry = get_stock_industry(runtime.database, code)
     except Exception:  # noqa: BLE001

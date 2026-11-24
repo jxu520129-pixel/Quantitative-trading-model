@@ -20,7 +20,7 @@ from ashare_quant.presentation import localize_dataframe, localize_payload
 from ashare_quant.risk import RiskManager
 from ashare_quant.services.signals import SignalService
 from ashare_quant.services.trading import TradingService, next_weekday
-from ashare_quant.strategies.factors import compute_factor
+from ashare_quant.factors import compute_factor
 from ashare_quant.strategies.factory import STRATEGIES
 from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, evaluate_conditions, evaluate_factor, run_signal_backtest
 
@@ -257,7 +257,7 @@ _FORMULA_TO_COMPUTE = {
 def test_new_factors_match_reference():
     """新增因子：公式求值与手算一致，且公式库与计算库（factors.py）口径一致。"""
     from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, evaluate_factor
-    from ashare_quant.strategies.factors import compute_factor
+    from ashare_quant.factors import compute_factor
 
     rng = np.random.default_rng(7)
     dates = pd.bdate_range("2024-01-01", periods=300)

@@ -21,7 +21,7 @@ for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
             os.environ.setdefault(k.strip(), v.strip())
 
 from ashare_quant.database import Database  # noqa: E402
-from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest  # noqa: E402
+from ashare_quant.strategies.limit_pullback_strategy import run_limit_pullback_backtest  # noqa: E402
 
 db = Database(ROOT / "data" / "ashare_quant_hist.db")
 

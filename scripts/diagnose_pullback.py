@@ -25,7 +25,7 @@ import pandas as pd  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 
 from ashare_quant.database import Database  # noqa: E402
-from ashare_quant.limit_pullback_strategy import (  # noqa: E402
+from ashare_quant.strategies.limit_pullback_strategy import (  # noqa: E402
     _detect_pullback_events, _scan_entry_signals, _load_panels, _MAIN_BOARD_PREFIXES,
 )
 from ashare_quant.market_rules import board_price_limit  # noqa: E402

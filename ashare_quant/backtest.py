@@ -16,7 +16,7 @@ from .database import Database
 from .market_rules import at_limit
 from .models import utc_now_text
 from .strategies.factor_strategy import FACTOR_STRATEGY_SPECS
-from .strategies.factors import cross_sectional_rank_score
+from .factors import cross_sectional_rank_score
 
 
 class ASharePandasData(bt.feeds.PandasData):

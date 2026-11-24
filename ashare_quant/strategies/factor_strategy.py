@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .base import BaseStrategy
-from .factors import cross_sectional_rank_score
+from ..factors import cross_sectional_rank_score
 
 
 class FactorStrategy(BaseStrategy):

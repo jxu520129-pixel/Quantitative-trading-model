@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from .database import Database
-from .strategies.factors import compute_factor
+from .factors import compute_factor
 
 LOG = logging.getLogger(__name__)
 

@@ -30,8 +30,8 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
-from .market_rules import TradingCosts, board_price_limit
-from .models import utc_now_text
+from ..market_rules import TradingCosts, board_price_limit
+from ..models import utc_now_text
 
 LOG = logging.getLogger(__name__)
 

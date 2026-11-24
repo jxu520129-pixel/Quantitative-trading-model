@@ -44,7 +44,7 @@ for line in open({env!r}, encoding="utf-8"):
         if k in ("TUSHARE_TOKEN", "TUSHARE_API_URL") and v.strip():
             os.environ.setdefault(k.strip(), v.strip())
 from ashare_quant.database import Database
-from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest
+from ashare_quant.strategies.limit_pullback_strategy import run_limit_pullback_backtest
 db = Database({hist_db!r})
 m = run_limit_pullback_backtest(db, None, start_date={start!r}, end_date={end!r},
                                 threshold={threshold}, persist=False, **{fixed!r})

@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from ashare_quant.hot_strategy import run_hot_backtest
-from ashare_quant.limit_pullback_strategy import run_limit_pullback_backtest
+from ashare_quant.strategies.hot_strategy import run_hot_backtest
+from ashare_quant.strategies.limit_pullback_strategy import run_limit_pullback_backtest
 from ashare_quant.lab import BUILTIN_FACTOR_FORMULAS, BUILTIN_STRATEGY_TEMPLATES, build_buy_report, evaluate_factor, fetch_scan_quotes, resolve_factor_expressions, run_signal_backtest
 from ashare_quant.data.providers import spot_prices
 from ashare_quant.models import utc_now_text

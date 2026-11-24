@@ -20,7 +20,7 @@ import pytest
 
 from ashare_quant.database import Database
 from ashare_quant.industry_chain import direct_industries
-from ashare_quant.main_rally import format_daily_events_html, match_event_candidates
+from ashare_quant.strategies.main_rally import format_daily_events_html, match_event_candidates
 from ashare_quant.models import utc_now_text
 
 
