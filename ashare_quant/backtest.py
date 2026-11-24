@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime
 from uuid import uuid4
 
@@ -59,7 +58,7 @@ class RankingBacktraderStrategy(bt.Strategy):
     """Run the selected cross-sectional strategy every Monday at that session's open."""
 
     params = (
-        ("strategy_name", "momentum_rotation"), ("parameters", None),
+        ("strategy_name", "simple_multifactor"), ("parameters", None),
         ("max_positions", 5), ("max_daily_buys", 2),
     )
 
@@ -126,40 +125,14 @@ class RankingBacktraderStrategy(bt.Strategy):
         else:
             self.sell(data=data, size=min(position.size, shares))
 
-    def _score(self, data) -> float | None:
-        """对单只标的计算回测评分（内联实现动量轮动与双均线两种策略）。"""
-        name = self.p.strategy_name
-        if name == "momentum_rotation":
-            lookback = int(self.parameters.get("lookback_days", 60))
-            if len(data) <= lookback + 1:
-                return None
-            amounts = [float(data.amount[-index]) for index in range(1, min(21, len(data)))]
-            if amounts and np.mean(amounts) < float(self.parameters.get("min_average_amount", 0)):
-                return None
-            return float(data.close[-1] / data.close[-lookback - 1] - 1)
-        if name == "dual_moving_average":
-            fast = int(self.parameters.get("fast_window", 10))
-            slow = int(self.parameters.get("slow_window", 30))
-            if len(data) <= slow:
-                return None
-            fast_ma = np.mean([float(data.close[-index]) for index in range(1, fast + 1)])
-            slow_ma = np.mean([float(data.close[-index]) for index in range(1, slow + 1)])
-            return float(fast_ma / slow_ma - 1) if fast_ma > slow_ma else None
-        raise ValueError(f"不支持的回测策略：{name}")
-
     def _score_universe(self) -> list[tuple[str, float]]:
-        """对全部标的打分：因子策略走共享的横截面打分，其余走内联实现，返回按分排序的列表。"""
+        """对全部标的打分：仅支持因子策略，走共享的横截面打分。"""
         specs = FACTOR_STRATEGY_SPECS.get(self.p.strategy_name)
-        if specs is not None:
-            frames = {data._name: self._frame(data) for data in self.datas}
-            scored = cross_sectional_rank_score(frames, specs, self.parameters)
-            return [(code, score) for code, score, _reason in scored]
-        ranked: list[tuple[str, float]] = []
-        for data in self.datas:
-            score = self._score(data)
-            if score is not None and math.isfinite(score):
-                ranked.append((data._name, score))
-        return ranked
+        if specs is None:
+            raise ValueError(f"不支持的回测策略：{self.p.strategy_name}")
+        frames = {data._name: self._frame(data) for data in self.datas}
+        scored = cross_sectional_rank_score(frames, specs, self.parameters)
+        return [(code, score) for code, score, _reason in scored]
 
     def _frame(self, data, lookback: int = 400) -> pd.DataFrame:
         """把 Backtrader 数据线转成日线 DataFrame（只取已收盘 bar，与实盘口径一致）。"""

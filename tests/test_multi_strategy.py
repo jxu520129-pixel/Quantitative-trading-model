@@ -324,7 +324,7 @@ def test_lab_strategy_key_and_detection() -> None:
     assert is_lab_strategy("lab:箱体突破")
     assert not is_lab_strategy("lab_signal")
     assert not is_lab_strategy("lab:")
-    assert not is_lab_strategy("momentum_rotation")
+    assert not is_lab_strategy("simple_multifactor")
 
 
 def test_resolve_strategies_falls_back_to_all_custom(tmp_path: Path) -> None:

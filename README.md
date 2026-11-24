@@ -121,7 +121,7 @@ Copy-Item .env.example .env
 ```powershell
 python -m ashare_quant.cli init-db
 python -m ashare_quant.cli seed-demo
-python -m ashare_quant.cli backtest --strategy momentum_rotation
+python -m ashare_quant.cli backtest --strategy simple_multifactor
 python -m ashare_quant.cli paper-demo        # 离线演示：信号→排队→下一交易日按开盘价成交
 python -m ashare_quant.cli status
 streamlit run dashboard.py
@@ -139,7 +139,7 @@ streamlit run dashboard.py
 
 ```powershell
 python -m ashare_quant.cli update-data
-python -m ashare_quant.cli generate-signals --strategy momentum_rotation   # 生成信号（含卖出离场判断）
+python -m ashare_quant.cli generate-signals --strategy simple_multifactor   # 生成信号（含卖出离场判断）
 python -m ashare_quant.cli intraday-trade                                  # 盘中即时交易：实时价买卖并当天成交
 ```
 
@@ -232,8 +232,6 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_tasks.ps1 -Mode
 
 | 策略标识 | 说明 | 使用因子 |
 |---|---|---|
-| `momentum_rotation` | 周度动量轮动 | 动量 + 成交额过滤 |
-| `dual_moving_average` | 双均线趋势 | 快慢均线 |
 | `simple_multifactor` | 简易多因子 | 动量、波动率、流动性 |
 | `reversal` | 短期反转 | 5 日反转 |
 | `low_volatility` | 低波动 | 波动率、ATR |
@@ -650,8 +648,8 @@ text, hints = analyze_stock_with_hints("600519", "贵州茅台", "能买吗？",
 Backtrader 在每周首个交易日开盘调仓，最多持有 5 只、单日最多新开 2 只、单票目标权重 20%，下单数量取 100 股整数倍。费用为佣金万 2.5 且最低 5 元，卖出印花税千 1，默认滑点万 5。策略会拦截涨停买入、跌停卖出并记录买入日以限制当日卖出。
 
 ```powershell
-python -m ashare_quant.cli backtest --strategy momentum_rotation --start 2020-01-01 --end 2026-08-15
-python -m ashare_quant.cli backtest --strategy dual_moving_average
+python -m ashare_quant.cli backtest --strategy simple_multifactor --start 2020-01-01 --end 2026-08-15
+python -m ashare_quant.cli backtest --strategy reversal
 python -m ashare_quant.cli backtest --strategy simple_multifactor
 ```
 

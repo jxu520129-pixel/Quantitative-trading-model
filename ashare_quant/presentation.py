@@ -11,8 +11,6 @@ import pandas as pd
 
 
 STRATEGY_LABELS = {
-    "momentum_rotation": "周度动量轮动",
-    "dual_moving_average": "双均线趋势",
     "simple_multifactor": "简易多因子",
     "reversal": "短期反转",
     "low_volatility": "低波动",

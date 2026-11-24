@@ -62,21 +62,21 @@ def test_board_price_limit_2026():
 def test_chinese_display_text():
     payload = localize_payload({
         "mode": "PAPER",
-        "strategy": "momentum_rotation",
+        "strategy": "reversal",
         "status": "FILLED",
         "reason": "No longer in selected portfolio",
     })
     assert payload == {
         "运行模式": "模拟盘",
-        "策略": "周度动量轮动",
+        "策略": "短期反转",
         "状态": "已成交",
         "信号依据": "不再属于目标组合",
     }
     table = localize_dataframe(pd.DataFrame([{
-        "code": "600000", "side": "BUY", "status": "FILLED", "strategy": "momentum_rotation",
+        "code": "600000", "side": "BUY", "status": "FILLED", "strategy": "reversal",
     }]))
     assert table.to_dict("records") == [{
-        "证券代码": "600000", "方向": "买入", "状态": "已成交", "策略": "周度动量轮动",
+        "证券代码": "600000", "方向": "买入", "状态": "已成交", "策略": "短期反转",
     }]
     help_text = build_parser().format_help()
     assert "模拟盘优先的 A 股量化交易系统" in help_text
@@ -86,7 +86,7 @@ def test_chinese_display_text():
 
 def test_paper_signal_to_fill(tmp_path: Path):
     _settings, database, _data, broker, signals, trading = make_services(tmp_path)
-    generated = signals.generate(strategy_name="momentum_rotation")
+    generated = signals.generate(strategy_name="simple_multifactor")
     assert generated
     queued = trading.queue_new_signals(generated[0].as_of_date)
     assert 0 < queued["queued"] <= 2
@@ -103,7 +103,7 @@ def test_paper_signal_to_fill(tmp_path: Path):
 def test_backtrader_run(tmp_path: Path):
     settings, database, data, _broker, _signals, _trading = make_services(tmp_path)
     dates = database.query_one("SELECT MIN(trade_date) AS start,MAX(trade_date) AS end FROM daily_bars")
-    result = BacktestEngine(database, data, settings).run("momentum_rotation", dates["start"], dates["end"])
+    result = BacktestEngine(database, data, settings).run("simple_multifactor", dates["start"], dates["end"])
     assert result["final_equity"] > 0
     assert result["equity_curve"]
     assert database.query_one("SELECT COUNT(*) AS count FROM backtest_runs")["count"] == 1

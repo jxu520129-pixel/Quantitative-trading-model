@@ -6,16 +6,12 @@ from .base import BaseStrategy
 from .factor_strategy import FACTOR_STRATEGIES
 from .lab_custom import LabCustomStrategy
 from .lab_signal import LabSignalStrategy
-from .moving_average import DualMovingAverageStrategy
-from .momentum import MomentumRotationStrategy
 
 
 # 因子实验室自定义策略的标识前缀：``lab:<策略名>`` 表示运行**单个**自定义策略。
 LAB_PREFIX = "lab:"
 
 STRATEGIES: dict[str, type[BaseStrategy]] = {
-    "momentum_rotation": MomentumRotationStrategy,
-    "dual_moving_average": DualMovingAverageStrategy,
     "lab_signal": LabSignalStrategy,
     **FACTOR_STRATEGIES,
 }
