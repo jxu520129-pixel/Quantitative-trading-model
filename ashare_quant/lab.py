@@ -186,29 +186,6 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, tuple[str, dict[str, Any], dict[str, Any]]
          "description": "涨停回马枪形态引擎，代码在 ashare_quant/limit_pullback_strategy.py"},
         {"combine": "OR", "conditions": []},
     ),
-    # ── 新因子示例模板（2026-11 新增因子，绩效待回测验证，导入后可自行调参）──
-    "布林带收口·放量突破": (
-        "布林带宽收窄(<8%，变盘前兆) + 收盘突破前4日高点 + 量比>1.5 + 站上20日线；移动止损10%/止盈20%",
-        {"combine": "AND", "conditions": [
-            {"factor": "boll_width", "op": "<", "value": 0.08},
-            {"factor": "breakout_4", "op": ">", "value": 0.005},
-            {"factor": "vol_ratio", "op": ">", "value": 1.5},
-            {"factor": "ma20_dev", "op": ">", "value": 0.0},
-        ]},
-        {"combine": "OR", "conditions": [],
-         "stop_loss_pct": 0.0, "take_profit_pct": 0.20, "trailing_stop_pct": 0.10, "breakout_exit": False},
-    ),
-    "超卖反转·KDJ回升": (
-        "KDJ·J值超卖(<0) + 上涨力量占比>0.5 + 距20日低点<15% + 站上5日线；止损6%/止盈15%",
-        {"combine": "AND", "conditions": [
-            {"factor": "kdj_j", "op": "<", "value": 0.0},
-            {"factor": "updown_ratio", "op": ">", "value": 0.5},
-            {"factor": "near_low_20", "op": "<", "value": 0.15},
-            {"factor": "bias_5", "op": ">", "value": 0.0},
-        ]},
-        {"combine": "OR", "conditions": [],
-         "stop_loss_pct": 0.06, "take_profit_pct": 0.15, "trailing_stop_pct": 0.0, "breakout_exit": False},
-    ),
 }
 
 OPS = {
